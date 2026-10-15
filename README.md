@@ -182,7 +182,7 @@ tuned. Changes apply to the next call and survive a restart.
 | **Speaking rate** | 0.5–2.0, where 1.0 is the voice's own pace. Both engines take it: Piper as an inverse `length_scale`, the cloud CLI as `--rate`. |
 | **Voice** | Local Piper voices (every `.onnx` pair under the voice directory) and cloned voices, in one list. |
 | **Cloud voice** | One of 12 system voices, used when no local voice is available. |
-| **Clone from a recording** | Upload 6–30 s of speech to create a voice. The recording stays on this machine. |
+| **Clone from a recording** | Upload 6–30 s of speech in any common audio format to create a voice. It is converted on this machine and never uploaded anywhere. |
 | **Allow the cloud to stand in** | Whether a local failure may fall back to the cloud voice and recognizer. See below. |
 | **Call picture** | Upload a PNG, JPEG, WebP, or GIF to replace the generated avatar. It is stored on this machine, and removing it restores the generated one. |
 
@@ -217,6 +217,16 @@ as the response's `content-type`: an unchecked value would let an upload choose
 how the browser interprets it.
 
 ### Voice cloning
+
+An upload does not have to be a WAV. **Any common audio format is converted on
+this machine** with ffmpeg — MP3, M4A, OGG, FLAC, Opus, or a WAV at another rate
+or channel count — because the user has no reason to know which shape the engine
+wants. A file that is already canonical is stored untouched, so the common case
+costs no subprocess. A file that is not audio at all is still refused, with a
+sentence naming the formats that work.
+
+Measured here, every one of those formats produced a sample the engine cloned
+from and that recognized back to the original sentence.
 
 Cloning runs **locally** through Coqui XTTS v2, so a cloned voice needs no cloud
 account and the recording never leaves the machine. It is much heavier than
@@ -271,6 +281,9 @@ unavailable; the local and cloud voices are unaffected.
   faster model for you; it only switches when the configured one cannot answer,
   because moving the conversation onto another model is not the plugin's
   decision to make. Probing costs one request, cached for `routeTtlMs`.
+- **A clone upload is converted with ffmpeg.** The plugin runs `ffmpeg` from
+  `PATH`; set `ffmpegPath` if it lives elsewhere. Without ffmpeg, only a file
+  that is already 16 kHz mono PCM16 WAV can be used, and the upload reports why.
 - **Cloning is local and slow to load.** The model takes about 75 s to load and
   about 1.8 GB of memory. This happens once at startup (`prewarm: true`); with
   pre-warming off, the first sentence of the first call waits that long. A

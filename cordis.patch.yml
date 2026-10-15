@@ -114,6 +114,11 @@
         cloneId: ''
         voiceDir: ''
         cloneDir: ''
+        # An uploaded clone recording is converted to 16 kHz mono PCM16 with
+        # ffmpeg, so the user can supply whatever format they have. A 30 s
+        # stereo 44.1 kHz WAV is about 5 MB, hence the larger ceiling.
+        ffmpegPath: ffmpeg
+        maxCloneBytes: 33554432
         # The call picture; empty selects ~/.dsh/voice-call/avatar.img.
         avatarFile: ''
         maxAvatarBytes: 4194304

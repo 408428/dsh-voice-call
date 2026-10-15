@@ -108,6 +108,22 @@ export const Config = z.object({
   /** Largest accepted avatar upload, in bytes. */
   maxAvatarBytes: z.natural().min(1).default(4 * 1024 * 1024),
   /**
+   * Largest accepted clone recording, in bytes.
+   *
+   * Larger than {@link maxAudioBytes}, which carries browser recordings that are
+   * always 16 kHz mono. A clone upload is whatever file the user has: 30 seconds
+   * of stereo 44.1 kHz WAV is about 5 MB, so the smaller ceiling would refuse a
+   * perfectly reasonable sample.
+   */
+  maxCloneBytes: z.natural().min(46).default(32 * 1024 * 1024),
+  /**
+   * Path of the ffmpeg binary used to convert an uploaded recording.
+   *
+   * A clone sample arrives in whatever format the user has. Converting here
+   * accepts what they have instead of making them produce a specific one.
+   */
+  ffmpegPath: z.string().min(1).default('ffmpeg'),
+  /**
    * Whether the cloud voice and recognizer may stand in when the local ones
    * cannot.
    *
@@ -350,11 +366,7 @@ async function persistVoice(ctx, voice) {
  * @param name - display name the user gave, possibly empty.
  * @returns the created voice entry.
  */
-async function saveClone(ctx, config, audio, name) {
-  // The sample is normalized on the way in, so a recording that is valid but
-  // carries metadata is accepted here and stored in the strict shape every
-  // consumer downstream expects.
-  const canonical = canonicalizeWave(audio)
+async function saveClone(ctx, config, canonical, name) {
   const seconds = canonical.length / 32000
   const dir = localPaths(config).cloneDir
   // A time-ordered id keeps clones distinguishable without asking the user to
@@ -367,6 +379,105 @@ async function saveClone(ctx, config, audio, name) {
   await writeFile(join(home, 'voice.json'), JSON.stringify({ name: label, at: new Date().toISOString(), seconds: Math.round(seconds * 10) / 10 }), 'utf8')
   ctx.logger.info(`voice-call stored clone voice "${label}" (${id}, ${seconds.toFixed(1)}s)`)
   return { id, name: label, engine: 'clone', seconds: Math.round(seconds * 10) / 10 }
+}
+
+/**
+ * Run one external command and collect its output.
+ *
+ * Separate from {@link runCli} because that one is pinned to `bl`: this runs
+ * whatever the caller names, which is what a conversion needs.
+ *
+ * @param ctx - plugin context owning the subprocess service.
+ * @param argv - command and arguments.
+ * @param cwd - working directory.
+ * @param config - validated plugin config.
+ * @returns exit code and both streams.
+ */
+async function runCommand(ctx, argv, cwd, config) {
+  const signal = AbortSignal.timeout(config.commandTimeoutMs)
+  const handle = ctx.subprocess.spawn({
+    argv,
+    cwd,
+    graceMs: 1000,
+    signal,
+    stdio: {
+      stdin: 'ignore',
+      stdout: { maxBytes: 1024 * 1024 },
+      stderr: { maxBytes: 256 * 1024 },
+    },
+  })
+  let outcome
+  try {
+    outcome = await handle.done
+  } catch (error) {
+    handle.terminate()
+    await handle.waitForExit().catch(() => undefined)
+    throw error
+  }
+  const stdout = handle.collected.stdout?.readFrom(0).text ?? ''
+  const stderr = handle.collected.stderr?.readFrom(0).text ?? ''
+  return { code: outcome.exitCode, stdout, stderr }
+}
+
+/**
+ * Turn any uploaded audio into the canonical 16 kHz mono PCM16 WAV.
+ *
+ * A recording is whatever the user happens to have: an MP3, an M4A from a
+ * phone, a WebM from the browser, or a WAV at some other rate. Rejecting those
+ * puts the conversion on the user, who has no reason to know what the engine
+ * wants; running ffmpeg here accepts what they have instead.
+ *
+ * A file that is ALREADY canonical is returned untouched, so the common case
+ * costs no subprocess at all.
+ *
+ * @param ctx - plugin context owning the subprocess service.
+ * @param config - validated plugin config.
+ * @param audio - uploaded bytes.
+ * @param work - per-request temp directory.
+ * @returns the canonical WAV, and whether a conversion happened.
+ * @throws {RequestError} when the bytes are not decodable audio.
+ */
+async function toCanonicalWave(ctx, config, audio, work) {
+  // Fast path: already the exact shape, so no subprocess is needed.
+  try {
+    return { bytes: canonicalizeWave(audio), converted: false }
+  } catch { /* not canonical; fall through to ffmpeg */ }
+  const input = join(work, 'upload')
+  const output = join(work, 'converted.wav')
+  await writeFile(input, audio)
+  let result
+  try {
+    result = await runCommand(ctx, [
+      config.ffmpegPath, '-hide_banner', '-nostdin', '-y',
+      '-i', input,
+      // Audio only: an M4A or MP4 also carries a video track, and keeping it
+      // would make ffmpeg's output a container the engine cannot read.
+      '-vn',
+      '-ac', '1',
+      '-ar', '16000',
+      '-c:a', 'pcm_s16le',
+      '-f', 'wav',
+      output,
+    ], work, config)
+  } catch (error) {
+    throw new RequestError(`Audio could not be converted (ffmpeg unavailable: ${error instanceof Error ? error.message : String(error)})`, 503)
+  }
+  if (result.code !== 0) {
+    // ffmpeg's wording is aimed at a developer reading a terminal ("Error
+    // opening input files: Invalid data found when processing input"), so the
+    // common case gets a plain sentence and anything else keeps ffmpeg's own
+    // last line, which is what identifies an unusual failure.
+    const lines = result.stderr.trim().split('\n').filter((line) => line.trim() !== '')
+    const detail = lines[lines.length - 1] ?? ''
+    const unreadable = /Invalid data found|could not find codec|moov atom not found|No such file/i.test(detail)
+    throw new RequestError(unreadable
+      ? 'That file is not audio this machine can read. Try an MP3, M4A, WAV, OGG, or FLAC recording.'
+      : `Audio could not be converted: ${detail || `ffmpeg exited with ${String(result.code)}`}`, 400)
+  }
+  const converted = await readFile(output)
+  if (converted.length <= 44) throw new RequestError('The recording contained no audio', 400)
+  // ffmpeg writes its own metadata chunk, so the output is canonicalized too.
+  return { bytes: canonicalizeWave(converted), converted: true }
 }
 
 /**
@@ -1490,11 +1601,14 @@ export function apply(ctx, config) {
           // Clone a voice from an uploaded recording. The sample is kept so the
           // engine can re-read it, because XTTS needs the reference audio on
           // every synthesis rather than a derived speaker embedding.
-          const body = await readBody(req, config.maxAudioBytes)
-          if (body.length < 46) throw new RequestError('No audio was sent', 400)
+          const body = await readBody(req, config.maxCloneBytes)
+          if (body.length === 0) throw new RequestError('No audio was sent', 400)
           const name = new URL(req.url || '/', 'http://localhost').searchParams.get('name') ?? ''
-          const created = await saveClone(ctx, config, body, name)
-          json(res, 201, { voice: created })
+          // Whatever format arrived is converted here, so the sample is stored
+          // in the one shape every consumer downstream expects.
+          const { bytes, converted } = await toCanonicalWave(ctx, config, body, work)
+          const created = await saveClone(ctx, config, bytes, name)
+          json(res, 201, { voice: created, converted })
           return
         }
         if (route === `${ROUTE_PREFIX}/avatar` && (req.method === 'GET' || req.method === 'HEAD')) {

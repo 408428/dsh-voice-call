@@ -65,13 +65,14 @@
           'settings.noLocal': 'No local voice models found.',
           'settings.noClone': 'No cloned voices yet. Upload a recording below.',
           'settings.clone': 'Clone a voice from a recording',
-          'settings.cloneHint': 'Upload 6-30 seconds of clear speech. The recording is kept locally and never uploaded anywhere.',
+          'settings.cloneHint': 'Upload 6-30 seconds of clear speech in any common audio format (MP3, M4A, WAV, OGG, FLAC). It is converted on this machine and never uploaded anywhere.',
           'settings.cloneName': 'Name for this voice',
           'settings.cloneNamePlaceholder': 'For example: my voice',
           'settings.cloneChoose': 'Choose a recording',
           'settings.cloneUpload': 'Create voice',
           'settings.cloneWorking': 'Creating…',
           'settings.cloneOk': 'Voice "{name}" is ready.',
+          'settings.cloneConverted': 'Voice "{name}" is ready. The recording was converted to 16 kHz mono on this machine.',
           'settings.cloneFailed': 'Could not create the voice: {message}',
           'settings.loadFailed': 'Could not read the voice settings: {message}',
           'settings.saveFailed': 'Could not save: {message}',
@@ -141,13 +142,14 @@
           'settings.noLocal': '没有找到本地声线模型。',
           'settings.noClone': '还没有复刻声线。在下面上传一段录音即可。',
           'settings.clone': '上传录音生成声线',
-          'settings.cloneHint': '上传 6-30 秒清晰的说话录音。录音只保存在本机，不会上传到任何地方。',
+          'settings.cloneHint': '上传 6-30 秒清晰的说话录音，常见音频格式都行（MP3、M4A、WAV、OGG、FLAC）。转换在本机完成，录音不会上传到任何地方。',
           'settings.cloneName': '给这个声线起个名字',
           'settings.cloneNamePlaceholder': '例如：我的声音',
           'settings.cloneChoose': '选择录音',
           'settings.cloneUpload': '生成声线',
           'settings.cloneWorking': '正在生成…',
           'settings.cloneOk': '声线"{name}"已就绪。',
+          'settings.cloneConverted': '声线"{name}"已就绪。录音已在本机转换为 16 kHz 单声道。',
           'settings.cloneFailed': '生成声线失败：{message}',
           'settings.loadFailed': '读取声音设置失败：{message}',
           'settings.saveFailed': '保存失败：{message}',
@@ -1313,7 +1315,9 @@
             if (!response.ok) throw new Error(body?.error ?? `HTTP ${String(response.status)}`)
             await load()
             await write({ cloneId: body.voice.id })
-            store.set({ notice: { key: 'settings.cloneOk', params: { name: body.voice.name } } })
+            // Say when the recording was converted, so a user who uploaded an
+            // MP3 knows it was understood rather than silently altered.
+            store.set({ notice: { key: body.converted === true ? 'settings.cloneConverted' : 'settings.cloneOk', params: { name: body.voice.name } } })
           } catch (error) {
             store.set({ saving: false, notice: { key: 'settings.cloneFailed', params: { message: String(error?.message ?? error) } } })
           }
@@ -1494,7 +1498,7 @@
             }),
             h('div', { className: 'dvc-set-row' },
               h('label', { className: 'dvc-set-file' },
-                h('input', { type: 'file', accept: 'audio/wav,audio/x-wav', onChange: pick }),
+                h('input', { type: 'file', accept: 'audio/*', onChange: pick }),
                 file === null ? t('settings.cloneChoose') : file.name),
               h('button', {
                 type: 'button', className: 'dvc-set-primary',
@@ -1502,7 +1506,7 @@
                 onClick: () => { if (file !== null) void settings.clone(file, name) },
               }, state.saving ? t('settings.cloneWorking') : t('settings.cloneUpload')))),
           state.notice === null ? null : h('p', {
-            className: ['settings.saved', 'settings.cloneOk', 'settings.avatarOk', 'settings.avatarCleared'].includes(state.notice.key) ? 'dvc-set-ok' : 'dvc-set-error',
+            className: ['settings.saved', 'settings.cloneOk', 'settings.cloneConverted', 'settings.avatarOk', 'settings.avatarCleared'].includes(state.notice.key) ? 'dvc-set-ok' : 'dvc-set-error',
           }, t(state.notice.key, state.notice.params)))
       }
 

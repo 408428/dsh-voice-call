@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Voice call",
+    "description": "WeChat-style voice call with the agent: a phone button in the session header opens a call screen with an avatar, accept and hang-up buttons, spoken replies, and live transcription."
+  }
+}

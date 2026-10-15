@@ -1,0 +1,11 @@
+# Dependencies are installed from the lockfile; the tree itself is not source.
+node_modules/
+
+# Python bytecode from the workers.
+__pycache__/
+*.py[cod]
+
+# Editor and OS noise.
+.DS_Store
+*.swp
+*~

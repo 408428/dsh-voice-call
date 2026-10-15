@@ -1,0 +1,133 @@
+# Voice call bundle.
+#
+# Inserts two things:
+#
+# 1. `preset-voice-call` — an agent preset with NO tools. The coding presets
+#    carry `tool-bash`, `tool-fs` and the rest, which is what made a call
+#    unusable: a two-word greeting was answered with 32 tool calls and more than
+#    two minutes of wall-clock time, because the agent behaved like a coding
+#    agent. A call needs an agent that can only answer.
+#
+# 2. `voice-call` — the Host plugin owning the two speech routes the browser half
+#    calls: `/.dsh-voice-call/tts` (text to audio) and `/.dsh-voice-call/asr`
+#    (recorded WAV to text).
+#
+# Speech synthesis prefers a LOCAL Piper voice kept resident in its own child
+# process, which answers a sentence in tens of milliseconds; the Bailian cloud
+# voice is the fallback. Recognition goes through the `bl` CLI, which already
+# holds the user's API key in ~/.bailian/config.json. The local engine needs a
+# one-time install:
+#
+#   python3 -m venv ~/.dsh/voice-call/venv
+#   ~/.dsh/voice-call/venv/bin/pip install piper-tts
+#   # plus a voice model at ~/.dsh/voice-call/models/<name>.onnx(.json)
+#
+# Without it the plugin still works on the cloud voice.
+#
+# The row ids match their plugins' `name` exports; the Client half registers
+# under the package name, which is how the client-plugin convention keeps the
+# package name, the Client module id, and the boot graph row aligned.
+
+- insert:
+    # A chat-only agent for calls.
+    #
+    # The point is what this preset does NOT carry: `tool-bash`, `tool-fs`, and
+    # the rest of the coding set, which is what made a two-word greeting take 32
+    # tool calls and 124 seconds. A call needs an agent that answers.
+    #
+    # It carries no tools, but it DOES carry `time-context`: without it the agent
+    # has no idea what day it is and cannot answer "what day is today", because
+    # the runtime-context snapshot holds the working directory and sandbox policy
+    # rather than a clock. A preset is a whole agent, not a prompt, so anything
+    # the agent needs in order to answer belongs in this list.
+    - id: preset-voice-call
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: voice-call
+        name: Voice call
+        order: 5
+        plugins:
+          # The clock. It arrives as a durable per-step message, which is what
+          # lets a call answer "what day is it" without any tool.
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              # The call's own instructions. It states the medium and the shape of
+              # a spoken answer.
+              prefix: |-
+                You are a spoken voice assistant on a phone call, and your voice
+                is called {{voice}}. If the user asks who you are or what your
+                voice is called, that name is your answer.
+
+                The user is talking to you, not typing, and your replies are read
+                aloud sentence by sentence as you write them.
+
+                Answer in short spoken sentences, like a person on a call: two
+                or three sentences unless the user asks for detail. Use plain
+                words and no markdown, no bullet lists, no code, and no file
+                paths, because none of that can be heard.
+
+                You have no tools on this call. Anything you can answer from what
+                you already know, answer directly. If the user asks you to do
+                something that needs a tool or a computer, say plainly that this
+                call cannot do it, and offer to do it when the call ends.
+
+                Reply in the language the user speaks.
+              # The prefix is the whole system prompt, which keeps the coding
+              # agent's guidance and the skill catalog out of a call. It does not
+              # suppress `time-context`: that plugin contributes a durable user
+              # message of its own rather than a prompt section, so the clock
+              # still reaches the agent.
+              complete: true
+
+    - id: voice-call
+      name: '@local/dsh-voice-call'
+      config:
+        # Local voice first: a call cannot afford a cloud round trip per sentence.
+        localTts: true
+        # Empty paths select ~/.dsh/voice-call/{venv/bin/python,models/...}.
+        localTtsModel: ''
+        localTtsPython: ''
+        # Local recognition through the Harness's own SenseVoice service
+        # (~0.13 s vs ~1.0-1.9 s for the cloud CLI); the CLI is the fallback.
+        localAsr: true
+        asrProvider: ''
+        # Cloud fallbacks, used only when the local engine is unavailable.
+        ttsModel: cosyvoice-v3-flash
+        ttsVoice: longwan_v3
+        asrModel: qwen3-asr-flash
+        language: zh
+        maxReplyChars: 300
+        # Speaking rate and the deployment's default voice. The settings page
+        # writes these four (they are declared `volatile` in the plugin, which is
+        # what makes them writable through Settings) and the plugin reads them
+        # back on the next start.
+        rate: 1
+        localVoiceId: ''
+        cloudVoice: longwan_v3
+        cloneId: ''
+        voiceDir: ''
+        cloneDir: ''
+        # The call picture; empty selects ~/.dsh/voice-call/avatar.img.
+        avatarFile: ''
+        maxAvatarBytes: 4194304
+        # Local XTTS v2 cloning: about 75 s to load the model once, then about
+        # 0.3 s per sentence. Its weights and the Coqui runtime live in the same
+        # venv as Piper.
+        localClone: true
+        cloneTimeoutMs: 120000
+        # Load the selected voice at startup instead of during the first call.
+        # The clone model needs ~75 s to load, and paying that while a caller
+        # waits for the first sentence makes a call look broken.
+        prewarm: true
+        # Prove the deployment's own model answers before the call relies on it.
+        # The conversation stays on the normal model, and its thinking level is
+        # lowered for a call; only recognition and synthesis are local. A
+        # fallback route is chosen only when the default cannot answer.
+        probeRoute: true
+        preferredProviders: []
+        probeTimeoutMs: 8000
+        probeModelsPerProvider: 3
+        routeTtlMs: 300000

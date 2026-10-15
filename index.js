@@ -684,11 +684,19 @@ class LocalEngine {
     this.child = child
     child.stdout.setEncoding('utf8')
     child.stdout.on('data', (chunk) => { this.consume(chunk) })
-    const failed = (error) => { this.fail(error instanceof Error ? error : new Error(String(error))) }
+    // Every failure is attributed to the process that caused it. A replaced
+    // process exits AFTER its replacement has started, so an unattributed
+    // handler would reject the new process's readiness gate and every later
+    // utterance would fail -- which is exactly what switching voices did.
+    const failed = (error) => {
+      if (this.child !== child) return
+      this.fail(error instanceof Error ? error : new Error(String(error)))
+    }
     child.on('error', failed)
     child.on('exit', (code) => {
-      if (this.child === child) this.child = undefined
-      failed(new Error(`${this.options.label} exited with code ${String(code)}`))
+      if (this.child !== child) return
+      this.child = undefined
+      this.fail(new Error(`${this.options.label} exited with code ${String(code)}`))
     })
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', () => { /* diagnostics only; the protocol carries the reason */ })
@@ -750,6 +758,7 @@ class LocalEngine {
    * @param text - reply text.
    * @param options - per-request controls.
    * @param options.rate - speaking-rate multiplier.
+   * @param options.speakerWav - reference recording, for an engine that clones.
    * @returns PCM16 WAV bytes.
    */
   async speak(text, options = {}) {
@@ -761,7 +770,12 @@ class LocalEngine {
       const timer = setTimeout(() => {
         if (this.pending.delete(id)) settled.reject(new Error(`${this.options.label} timed out`))
       }, this.options.timeoutMs)
-      child.stdin.write(`${JSON.stringify({ id, text, rate: options.rate ?? 1 })}\n`)
+      child.stdin.write(`${JSON.stringify({
+        id,
+        text,
+        rate: options.rate ?? 1,
+        ...options.speakerWav === undefined ? {} : { speaker_wav: options.speakerWav },
+      })}\n`)
       try {
         return await settled.promise
       } finally {
@@ -794,12 +808,17 @@ class LocalEngine {
   /** Stop the resident process. */
   dispose() {
     const child = this.child
+    // Cleared first: the exit handler checks this field to decide whether the
+    // exit belongs to the process the engine is currently using, and a disposed
+    // process is by definition no longer that one.
     this.child = undefined
     // A restarted process needs its own readiness gate, so the old one is
     // cleared even when no process had started yet.
     this.readyPromise = undefined
     this.readySettle = undefined
     if (child === undefined) return
+    // Reject only the utterances queued against THIS process; a replacement's
+    // waiters are separate and must be left alone.
     this.fail(new Error(`${this.options.label} stopped`))
     child.kill()
   }
@@ -1319,7 +1338,8 @@ export function apply(ctx, config) {
       const started = Date.now()
       try {
         if (chosen.engine === 'clone') {
-          await clone.use([chosen.path, config.language])
+          // Started once, with the reference carried per request afterwards.
+          await clone.use([config.language])
           await clone.start()
         } else if (chosen.engine === 'piper') {
           await piper.use([chosen.path, `${chosen.path}.json`])
@@ -1356,8 +1376,12 @@ export function apply(ctx, config) {
           voice.label = chosen.label
           if (chosen.engine === 'clone') {
             try {
-              await clone.use([chosen.path, config.language])
-              audio = await clone.speak(text, { rate: voice.rate })
+              // The reference recording travels with the request, so one
+              // resident XTTS model serves every cloned voice. Restarting per
+              // voice would cost another ~75 s load for no benefit, since the
+              // model is the same and only the reference audio differs.
+              await clone.use([config.language])
+              audio = await clone.speak(text, { rate: voice.rate, speakerWav: chosen.path })
               source = 'clone'
             } catch (error) {
               if (!voice.cloudFallback) {

@@ -10,13 +10,17 @@ sentence would make a call unusable.
 The protocol matches `piper_worker.py` so the Host half can drive either engine
 with one code path:
 
-Request:  {"id": "<opaque>", "text": "<utf8 text>", "speaker_wav": "<path>", "rate": 1.0, "language": "zh"}
+Request:  {"id": "<opaque>", "text": "<utf8 text>", "speaker_wav": "<path>", "rate": 1.0}
 Reply:    {"id": "<opaque>", "wav": "<base64 PCM16 WAV>"}
           {"id": "<opaque>", "error": "<message>"}
 
-The reference recording is fixed at startup (`sys.argv[2]`), because a call uses
-one voice for its whole length and re-reading the sample per sentence would only
-add work. `rate` is a speaking-rate multiplier passed to XTTS as `speed`.
+The reference recording travels with each request (`speaker_wav`), not at
+startup. The loaded model is the same for every cloned voice -- only the
+reference audio differs -- so carrying it per request lets one resident model
+serve every voice, and switching voices costs nothing. Passing it at startup
+instead would mean a fresh 75-second load per voice.
+
+`rate` is a speaking-rate multiplier passed to XTTS as `speed`.
 
 @module voice-call/xtts_worker
 """
@@ -48,14 +52,11 @@ def emit(payload):
 
 
 def main():
-    if len(sys.argv) < 3:
-        emit({"id": None, "error": "usage: xtts_worker.py <speaker_wav> [language]"})
+    if len(sys.argv) < 2:
+        emit({"id": None, "error": "usage: xtts_worker.py <language>"})
         return 2
-    speaker_wav = sys.argv[1]
-    language = sys.argv[2] if len(sys.argv) > 2 else "zh"
-    if not os.path.exists(speaker_wav):
-        emit({"id": None, "error": f"reference audio not found: {speaker_wav}"})
-        return 1
+    # A default language for requests that name none; each request may override it.
+    language = sys.argv[1] or "zh"
 
     try:
         from TTS.api import TTS
@@ -87,6 +88,13 @@ def main():
             continue
 
         try:
+            speaker_wav = request.get("speaker_wav")
+            if not speaker_wav:
+                emit({"id": request_id, "error": "no speaker_wav given for a cloned voice"})
+                continue
+            if not os.path.exists(speaker_wav):
+                emit({"id": request_id, "error": f"reference audio not found: {speaker_wav}"})
+                continue
             rate = float(request.get("rate") or 1.0)
             # XTTS takes any path-like target, and an in-memory buffer keeps the
             # whole exchange inside this process: the reply is one base64 JSON
@@ -94,7 +102,7 @@ def main():
             buffer = io.BytesIO()
             model.tts_to_file(
                 text=text,
-                speaker_wav=request.get("speaker_wav") or speaker_wav,
+                speaker_wav=speaker_wav,
                 language=request.get("language") or language,
                 file_path=buffer,
                 speed=rate,

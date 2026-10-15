@@ -223,6 +223,11 @@ account and the recording never leaves the machine. It is much heavier than
 Piper: the model is about 1.8 GB and takes about **75 seconds to load**, after
 which a sentence costs about **0.3 s**.
 
+One loaded model serves **every** cloned voice, because only the reference
+recording differs between them and that travels with each request. Switching
+between two cloned voices therefore costs nothing after the first load: measured
+here, 灰原哀 answered in 75.6 s (the load) and 贾维斯 in **0.4 s**.
+
 That load happens at **startup**, not on the first call (`prewarm: true`). The
 worker stays resident exactly like the Piper one, so a call's first sentence
 costs about 0.8 s rather than 75 s. Measured here:

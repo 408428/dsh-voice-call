@@ -107,6 +107,16 @@ export const Config = z.object({
   avatarFile: z.string().default(''),
   /** Largest accepted avatar upload, in bytes. */
   maxAvatarBytes: z.natural().min(1).default(4 * 1024 * 1024),
+  /**
+   * Whether the cloud voice and recognizer may stand in when the local ones
+   * cannot.
+   *
+   * Off makes a call strictly local: if the local engine is missing or fails,
+   * the call reports it instead of quietly reaching a cloud API. That is the
+   * setting for a deployment that must not send audio off the machine, where a
+   * silent fallback would defeat the point.
+   */
+  cloudFallback: z.boolean().default(true).volatile(),
   /** Enable the local XTTS v2 cloning engine; requires its weights and a reference recording. */
   localClone: z.boolean().default(true),
   /**
@@ -201,6 +211,7 @@ async function loadVoiceSettings(ctx, voice) {
     if (typeof saved.localVoiceId === 'string') voice.localVoiceId = saved.localVoiceId
     if (typeof saved.cloudVoice === 'string') voice.cloudVoice = saved.cloudVoice
     if (typeof saved.cloneId === 'string') voice.cloneId = saved.cloneId
+    if (typeof saved.cloudFallback === 'boolean') voice.cloudFallback = saved.cloudFallback
   } catch (error) {
     ctx.logger.warn('voice-call could not read saved voice settings; using defaults', error)
   }
@@ -322,6 +333,7 @@ async function persistVoice(ctx, voice) {
     localVoiceId: voice.localVoiceId,
     cloudVoice: voice.cloudVoice,
     cloneId: voice.cloneId,
+    cloudFallback: voice.cloudFallback,
   })
 }
 
@@ -984,7 +996,7 @@ async function recognizeCloud(ctx, audio, work, config) {
  * @param config - validated plugin config.
  * @returns the recognized text and which engine produced it.
  */
-async function recognize(ctx, audio, work, config) {
+async function recognize(ctx, audio, work, config, allowCloud) {
   const local = ctx.get('speechToText')
   if (config.localAsr && local !== undefined) {
     try {
@@ -992,8 +1004,15 @@ async function recognize(ctx, audio, work, config) {
     } catch (error) {
       // A recognizer that cannot take this audio must not cost the call its
       // hearing; fall through to the cloud and keep the reason in the log.
+      if (!allowCloud) {
+        throw new Error(`Local recognition failed and cloud fallback is off: ${error instanceof Error ? error.message : String(error)}`)
+      }
       ctx.logger.warn('voice-call local recognition failed; using the cloud recognizer', error)
     }
+  } else if (!allowCloud) {
+    // No local recognizer and no permission to reach the cloud: the call cannot
+    // hear, and saying so is the honest answer.
+    throw new RequestError('Local recognition is unavailable and cloud fallback is off', 503)
   }
   return { text: await recognizeCloud(ctx, audio, work, config), source: 'cloud' }
 }
@@ -1186,6 +1205,8 @@ export function apply(ctx, config) {
     localVoiceId: readConfig(config.localVoiceId, config.localTtsModel),
     cloudVoice: readConfig(config.cloudVoice, config.ttsVoice),
     cloneId: readConfig(config.cloneId, ''),
+    /** Whether the cloud engines may stand in for a local failure. */
+    cloudFallback: readConfig(config.cloudFallback, true),
     /**
      * The selected voice's display name, kept in sync for the prompt variable.
      *
@@ -1339,6 +1360,9 @@ export function apply(ctx, config) {
               audio = await clone.speak(text, { rate: voice.rate })
               source = 'clone'
             } catch (error) {
+              if (!voice.cloudFallback) {
+                throw new RequestError(`Cloned-voice synthesis failed and cloud fallback is off: ${error instanceof Error ? error.message : String(error)}`, 502)
+              }
               ctx.logger.warn('voice-call clone synthesis failed; using the cloud voice', error)
             }
           } else if (chosen.engine === 'piper') {
@@ -1350,11 +1374,22 @@ export function apply(ctx, config) {
               source = 'local'
             } catch (error) {
               // A broken local engine must not cost the call its voice; fall
-              // back to the cloud and keep the reason in the Host log.
+              // back to the cloud and keep the reason in the Host log. With the
+              // fallback off, the failure is the answer instead.
+              if (!voice.cloudFallback) {
+                throw new RequestError(`Local synthesis failed and cloud fallback is off: ${error instanceof Error ? error.message : String(error)}`, 502)
+              }
               ctx.logger.warn('voice-call local synthesis failed; using the cloud voice', error)
             }
           }
-          if (audio === undefined) audio = await admission.run(() => synthesizeCloud(ctx, text, work, config, voice))
+          if (audio === undefined) {
+            // Reached when the selected engine is the cloud voice, or when a
+            // local failure was allowed to fall back.
+            if (!voice.cloudFallback && chosen.engine === 'cloud') {
+              throw new RequestError('No local voice is available and cloud fallback is off', 503)
+            }
+            audio = await admission.run(() => synthesizeCloud(ctx, text, work, config, voice))
+          }
           res.writeHead(200, {
             'content-type': source === 'cloud' ? 'audio/mpeg' : 'audio/wav',
             'cache-control': 'no-store',
@@ -1367,7 +1402,7 @@ export function apply(ctx, config) {
         if (route === `${ROUTE_PREFIX}/asr` && req.method === 'POST') {
           const audio = await readBody(req, config.maxAudioBytes)
           if (audio.length === 0) throw new RequestError('No audio was sent', 400)
-          const result = await admission.run(() => recognize(ctx, audio, work, config))
+          const result = await admission.run(() => recognize(ctx, audio, work, config, voice.cloudFallback))
           json(res, 200, { text: result.text, source: result.source }, { 'x-voice-source': result.source })
           return
         }
@@ -1388,6 +1423,7 @@ export function apply(ctx, config) {
               localVoiceId: voice.localVoiceId,
               cloudVoice: voice.cloudVoice,
               cloneId: voice.cloneId,
+              cloudFallback: voice.cloudFallback,
             },
           })
           return
@@ -1416,13 +1452,14 @@ export function apply(ctx, config) {
           if (typeof patch.localVoiceId === 'string') voice.localVoiceId = patch.localVoiceId
           if (typeof patch.cloudVoice === 'string') voice.cloudVoice = patch.cloudVoice
           if (typeof patch.cloneId === 'string') voice.cloneId = patch.cloneId
+          if (typeof patch.cloudFallback === 'boolean') voice.cloudFallback = patch.cloudFallback
           // The prompt variable follows the selection, so the agent's name for
           // itself changes with the voice rather than at the next call.
           voice.label = (await resolveVoice(ctx, config, voice)).label
           // The selection outlives the process, so it is written to the profile
           // entry the same way the speech plugins persist their own choices.
           await persistVoice(ctx, voice)
-          json(res, 200, { settings: { rate: voice.rate, localVoiceId: voice.localVoiceId, cloudVoice: voice.cloudVoice, cloneId: voice.cloneId } })
+          json(res, 200, { settings: { rate: voice.rate, localVoiceId: voice.localVoiceId, cloudVoice: voice.cloudVoice, cloneId: voice.cloneId, cloudFallback: voice.cloudFallback } })
           return
         }
         if (route === `${ROUTE_PREFIX}/clone` && req.method === 'POST') {

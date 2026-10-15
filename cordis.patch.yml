@@ -94,6 +94,10 @@
         # (~0.13 s vs ~1.0-1.9 s for the cloud CLI); the CLI is the fallback.
         localAsr: true
         asrProvider: ''
+        # Whether the cloud voice and recognizer may stand in when the local ones
+        # cannot. Turn this off to keep a call entirely on this machine: a local
+        # failure is then reported instead of quietly reaching a cloud API.
+        cloudFallback: true
         # Cloud fallbacks, used only when the local engine is unavailable.
         ttsModel: cosyvoice-v3-flash
         ttsVoice: longwan_v3

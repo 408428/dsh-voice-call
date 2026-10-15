@@ -183,7 +183,25 @@ tuned. Changes apply to the next call and survive a restart.
 | **Voice** | Local Piper voices (every `.onnx` pair under the voice directory) and cloned voices, in one list. |
 | **Cloud voice** | One of 12 system voices, used when no local voice is available. |
 | **Clone from a recording** | Upload 6–30 s of speech to create a voice. The recording stays on this machine. |
+| **Allow the cloud to stand in** | Whether a local failure may fall back to the cloud voice and recognizer. See below. |
 | **Call picture** | Upload a PNG, JPEG, WebP, or GIF to replace the generated avatar. It is stored on this machine, and removing it restores the generated one. |
+
+### Keeping a call local
+
+Recognition and synthesis each prefer a local engine and fall back to the cloud
+when one is missing or fails. **Allow the cloud to stand in** turns that fallback
+off, so a call stays entirely on this machine:
+
+| | On (default) | Off |
+| --- | --- | --- |
+| A local engine works | local | local |
+| A local engine fails | cloud, with a log line | the call reports the failure |
+| No local engine at all | cloud | the call reports the failure |
+
+Off is the setting for a deployment that must not send audio anywhere: a silent
+fallback would defeat that, because the failure is exactly the case where audio
+would leave the machine. Measured on this machine, the refusal reaches the
+browser as HTTP 503 with **zero** cloud invocations.
 
 ### The call picture
 
@@ -254,6 +272,9 @@ unavailable; the local and cloud voices are unaffected.
   voice's recording is stored under the plugin's data directory and re-read on
   each synthesis, because XTTS needs the reference audio rather than a derived
   embedding.
+- **The cloud fallback is on by default.** With it off, a missing or broken local
+  engine fails the call rather than reaching the cloud — that is the point, but
+  it does mean a call can be silent if the local engine is not installed.
 - **Recognition is local when the voice-input bundle is installed.** The plugin
   uses `speechToText` through `ctx.get`, so a profile without it still loads and
   falls back to the cloud CLI.

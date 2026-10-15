@@ -86,6 +86,9 @@
           'settings.avatarOk': 'The call picture is set.',
           'settings.avatarCleared': 'The call picture was removed.',
           'settings.avatarFailed': 'Could not set the picture: {message}',
+          'settings.fallback': 'Allow the cloud to stand in',
+          'settings.fallbackOn': 'On: if a local engine is missing or fails, the cloud voice and recognizer are used instead.',
+          'settings.fallbackOff': 'Off: a call stays entirely local. If a local engine fails, the call reports it instead of sending audio to a cloud API.',
           'call.newTitle': 'New voice call',
           'hint.route': 'Model: {name}',
           'notice.asrFailed': 'Could not recognize the recording: {message}',
@@ -159,6 +162,9 @@
           'settings.avatarOk': '通话头像已设置。',
           'settings.avatarCleared': '通话头像已移除。',
           'settings.avatarFailed': '设置头像失败：{message}',
+          'settings.fallback': '本地不可用时使用云端',
+          'settings.fallbackOn': '开启：本地引擎缺失或失败时，改用云端声线和识别。',
+          'settings.fallbackOff': '关闭：通话完全在本地进行。本地引擎失败时会直接报错，而不会把音频发往云端 API。',
           'call.newTitle': '新的语音通话',
           'hint.route': '模型：{name}',
           'notice.asrFailed': '语音识别失败：{message}',
@@ -1242,6 +1248,7 @@
           localVoiceId: '',
           cloudVoice: '',
           cloneId: '',
+          cloudFallback: true,
           voices: [],
           cloudVoices: [],
           saving: false,
@@ -1436,6 +1443,16 @@
               onChange: (event) => { void settings.write({ cloudVoice: event.target.value }) },
             }, state.cloudVoices.map((voice) => h('option', { key: voice.id, value: voice.id }, voice.name))),
             h('p', { className: 'dvc-set-note' }, t('settings.cloudHint'))),
+          // Whether the cloud may stand in for a local failure.
+          h('section', { className: 'dvc-set-block' },
+            h('label', { className: 'dvc-set-switch', htmlFor: 'dvc-fallback' },
+              h('input', {
+                id: 'dvc-fallback', type: 'checkbox', checked: state.cloudFallback,
+                onChange: (event) => { void settings.write({ cloudFallback: event.target.checked }) },
+              }),
+              h('span', { className: 'dvc-set-label' }, t('settings.fallback'))),
+            h('p', { className: 'dvc-set-note' },
+              t(state.cloudFallback ? 'settings.fallbackOn' : 'settings.fallbackOff'))),
           // The call picture.
           h('section', { className: 'dvc-set-block' },
             h('span', { className: 'dvc-set-label' }, t('settings.avatar')),
@@ -1511,6 +1528,9 @@
 .dvc-set-primary:disabled{opacity:.5;cursor:default}
 .dvc-set-ok{margin:0;color:var(--dsw-alias-label-secondary);font-size:12px}
 .dvc-set-avatar{width:44px;height:44px;border-radius:999px;object-fit:cover;border:1px solid var(--dsw-alias-border-l2)}
+.dvc-set-switch{display:flex;align-items:center;gap:8px;cursor:pointer}
+.dvc-set-switch input{width:16px;height:16px;accent-color:var(--dsw-alias-brand-primary)}
+.dvc-set-switch .dvc-set-label{font-weight:500}
 .dvc-set-quiet{padding:6px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;cursor:pointer}
 .dvc-set-quiet:hover{color:var(--dsw-alias-label-primary)}
 .dvc-set-error{margin:0;color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:1.6}

@@ -186,6 +186,7 @@ one:
 | **Name** | What the character is called, and what it answers with when asked who it is. |
 | **Personality** | Prose describing how it talks and behaves. It reaches the agent as `{{character_personality}}`. |
 | **Voice** | A local voice, a cloned voice, the cloud voice, or "follow the voice settings". |
+| **Speaking rate** | Its own pace, or follow the voice settings. |
 | **Picture** | Shown on the call screen in place of the generated avatar. |
 
 One character is **in use** at a time. Its voice wins over the voice settings
@@ -209,6 +210,16 @@ A character's **engine is stored explicitly**, which is what makes "cloud voice"
 distinguishable from "no voice named": the first is a decision, the second means
 follow the deployment's settings. Without that, a character asking for the cloud
 voice would silently get the local default.
+
+The same distinction applies to the **rate**. A character either sets its own
+pace or follows the voice settings, and those are different answers — so the
+stored value is a number or `null`, never a default of 1.0. A checkbox decides
+which, because a bare slider cannot express "no opinion". Measured here, one
+character at 0.7 spoke for 2.86 s and another at 1.5 for 2.04 s, over the same
+sentence.
+
+The **cloud-fallback switch stays deployment-wide**. It describes whether audio
+may leave this machine at all, which is not a property of who is speaking.
 
 ## Voice settings
 
@@ -319,10 +330,9 @@ unavailable; the local and cloud voices are unaffected.
   faster model for you; it only switches when the configured one cannot answer,
   because moving the conversation onto another model is not the plugin's
   decision to make. Probing costs one request, cached for `routeTtlMs`.
-- **A character's voice overrides the voice settings while it is in use.** The
-  rate and the cloud-fallback switch are deployment-wide and are not per
-  character, because they describe how this machine speaks rather than who is
-  speaking.
+- **A character's voice and rate override the settings while it is in use.** The
+  cloud-fallback switch stays deployment-wide: it decides whether audio may leave
+  this machine, which is not a property of who is speaking.
 - **A clone upload is converted with ffmpeg.** The plugin runs `ffmpeg` from
   `PATH`; set `ffmpegPath` if it lives elsewhere. Without ffmpeg, only a file
   that is already 16 kHz mono PCM16 WAV can be used, and the upload reports why.

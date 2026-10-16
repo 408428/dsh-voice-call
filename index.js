@@ -376,6 +376,11 @@ async function readCharacter(config, id) {
         localVoiceId: typeof raw.voice?.localVoiceId === 'string' ? raw.voice.localVoiceId : '',
         cloudVoice: typeof raw.voice?.cloudVoice === 'string' ? raw.voice.cloudVoice : '',
         cloneId: typeof raw.voice?.cloneId === 'string' ? raw.voice.cloneId : '',
+        // Speaking rate for this character. `null` means follow the global
+        // setting: a character need not have an opinion on pace, and an absent
+        // rate is not the same as asking for 1.0.
+        rate: typeof raw.voice?.rate === 'number' && raw.voice.rate >= 0.5 && raw.voice.rate <= 2
+          ? raw.voice.rate : null,
       },
       hasAvatar: await readable(join(characterDir(config, id), 'avatar.img')),
       at: typeof raw.at === 'string' ? raw.at : '',
@@ -428,6 +433,7 @@ async function createCharacter(ctx, config, name, personality, voice) {
       localVoiceId: voice?.localVoiceId ?? '',
       cloudVoice: voice?.cloudVoice ?? '',
       cloneId: voice?.cloneId ?? '',
+      rate: typeof voice?.rate === 'number' && voice.rate >= 0.5 && voice.rate <= 2 ? voice.rate : null,
     },
     at: new Date().toISOString(),
   }
@@ -455,6 +461,11 @@ async function updateCharacter(ctx, config, id, patch) {
       localVoiceId: typeof patch.voice?.localVoiceId === 'string' ? patch.voice.localVoiceId : current.voice.localVoiceId,
       cloudVoice: typeof patch.voice?.cloudVoice === 'string' ? patch.voice.cloudVoice : current.voice.cloudVoice,
       cloneId: typeof patch.voice?.cloneId === 'string' ? patch.voice.cloneId : current.voice.cloneId,
+      // `null` is a value here, not an omission: it is how the editor says
+      // "follow the global setting", which differs from leaving the field out.
+      rate: patch.voice?.rate === null ? null
+        : typeof patch.voice?.rate === 'number' && patch.voice.rate >= 0.5 && patch.voice.rate <= 2 ? patch.voice.rate
+          : current.voice.rate,
     },
     at: current.at,
   }
@@ -1619,6 +1630,8 @@ export function apply(ctx, config) {
       localVoiceId: picked.localVoiceId !== '' ? picked.localVoiceId : voice.localVoiceId,
       cloudVoice: picked.cloudVoice !== '' ? picked.cloudVoice : voice.cloudVoice,
       cloneId: picked.cloneId !== '' ? picked.cloneId : voice.cloneId,
+      // A character's pace wins while it is in use; null follows the setting.
+      rate: picked.rate ?? voice.rate,
       fromCharacter: true,
     }
   }
@@ -1772,8 +1785,12 @@ export function apply(ctx, config) {
           let audio
           let source = 'cloud'
           await refreshCharacter()
-          const chosen = await resolveVoice(ctx, config, effectiveVoice())
+          const effective = effectiveVoice()
+          const chosen = await resolveVoice(ctx, config, effective)
           voice.label = chosen.label
+          // The pace comes from the effective selection, so a character with its
+          // own rate speaks at that rate and one without follows the setting.
+          const rate = effective.rate
           if (chosen.engine === 'clone') {
             try {
               // The reference recording travels with the request, so one
@@ -1781,7 +1798,7 @@ export function apply(ctx, config) {
               // voice would cost another ~75 s load for no benefit, since the
               // model is the same and only the reference audio differs.
               await clone.use([config.language])
-              audio = await clone.speak(text, { rate: voice.rate, speakerWav: chosen.path })
+              audio = await clone.speak(text, { rate, speakerWav: chosen.path })
               source = 'clone'
             } catch (error) {
               if (!voice.cloudFallback) {
@@ -1794,7 +1811,7 @@ export function apply(ctx, config) {
               // The voice is chosen per request, so the engine adopts that
               // model first; a switch restarts the process.
               await piper.use([chosen.path, `${chosen.path}.json`])
-              audio = await piper.speak(text, { rate: voice.rate })
+              audio = await piper.speak(text, { rate })
               source = 'local'
             } catch (error) {
               // A broken local engine must not cost the call its voice; fall
@@ -1812,7 +1829,7 @@ export function apply(ctx, config) {
             if (!voice.cloudFallback && chosen.engine === 'cloud') {
               throw new RequestError('No local voice is available and cloud fallback is off', 503)
             }
-            audio = await admission.run(() => synthesizeCloud(ctx, text, work, config, voice))
+            audio = await admission.run(() => synthesizeCloud(ctx, text, work, config, { ...effective, rate }))
           }
           res.writeHead(200, {
             'content-type': source === 'cloud' ? 'audio/mpeg' : 'audio/wav',
@@ -1912,6 +1929,9 @@ export function apply(ctx, config) {
           json(res, 200, {
             characters: roster,
             activeCharacter: character.id,
+            // What "follow the voice settings" resolves to, so the editor can
+            // show the real number instead of a placeholder.
+            settingsRate: voice.rate,
             voices: [
               ...locals.map((entry) => ({ id: entry.id, name: entry.name, engine: 'piper' })),
               ...clones.map((entry) => ({ id: entry.id, name: entry.name, engine: 'clone' })),

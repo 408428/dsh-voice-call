@@ -105,6 +105,10 @@
           'characters.personalityPlaceholder': 'For example: 说话简洁冷静，偶尔带点毒舌，但本质上是关心对方的。',
           'characters.voice': 'Voice',
           'characters.voiceHint': 'Which voice this character speaks with. The cloud voice follows the cloud-voice setting below.',
+          'characters.rate': 'Speaking rate',
+          'characters.rateHint': 'How fast this character talks. 1.00 is the voice\'s own pace.',
+          'characters.rateFollow': 'Follow the voice settings ({value})',
+          'characters.rateOwn': 'This character sets its own rate',
           'characters.voiceDefault': 'Follow the voice settings',
           'characters.cloudVoice': 'Cloud voice',
           'characters.avatar': 'Picture',
@@ -208,6 +212,10 @@
           'characters.personalityPlaceholder': '例如：说话简洁冷静，偶尔带点毒舌，但本质上是关心对方的。',
           'characters.voice': '声线',
           'characters.voiceHint': '这个角色用哪个声音说话。选「云端声线」时使用下面的云端声线设置。',
+          'characters.rate': '语速',
+          'characters.rateHint': '这个角色说话的快慢。1.00 是声音本身的语速。',
+          'characters.rateFollow': '跟随声音设置（{value}）',
+          'characters.rateOwn': '这个角色单独设置语速',
           'characters.voiceDefault': '跟随声音设置',
           'characters.cloudVoice': '云端声线',
           'characters.avatar': '头像',
@@ -1449,6 +1457,7 @@
           error: null,
           characters: [],
           activeId: '',
+          settingsRate: 1,
           voices: [],
           cloudVoices: [],
           /** Id of the character open for editing, or '' for the roster. */
@@ -1468,6 +1477,7 @@
               error: null,
               characters: body.characters ?? [],
               activeId: body.activeCharacter ?? '',
+              settingsRate: typeof body.settingsRate === 'number' ? body.settingsRate : 1,
               voices: body.voices ?? [],
               cloudVoices: body.cloudVoices ?? [],
             })
@@ -1501,9 +1511,9 @@
         return {
           store, read, send,
           /** Start a new character from the current voice settings. */
-          beginCreate: () => store.set({ editing: 'new', draft: { name: '', personality: '', voice: { engine: '', localVoiceId: '', cloudVoice: '', cloneId: '' } } }),
+          beginCreate: () => store.set({ editing: 'new', draft: { name: '', personality: '', voice: { engine: '', localVoiceId: '', cloudVoice: '', cloneId: '', rate: null } } }),
           /** Open one character for editing. */
-          beginEdit: (character) => store.set({ editing: character.id, draft: { name: character.name, personality: character.personality, voice: { ...character.voice } } }),
+          beginEdit: (character) => store.set({ editing: character.id, draft: { name: character.name, personality: character.personality, voice: { ...character.voice, rate: character.voice?.rate ?? null } } }),
           /** Leave the editor without saving. */
           cancelEdit: () => store.set({ editing: '', draft: null }),
           /** Change one draft field. */
@@ -1758,6 +1768,27 @@
               clones.length > 0 ? h('optgroup', { label: t('settings.cloneGroup') },
                 clones.map((voice) => h('option', { key: voice.id, value: `clone:${voice.id}` }, voice.name))) : null),
               h('p', { className: 'dvc-set-note' }, t('characters.voiceHint'))),
+            // The pace. A checkbox decides whether the character has an opinion
+            // at all, because "follow the settings" and "1.0" are different
+            // answers and a bare slider cannot express the first.
+            h('section', { className: 'dvc-set-block' },
+              h('label', { className: 'dvc-set-switch', htmlFor: 'dvc-char-rate-own' },
+                h('input', {
+                  id: 'dvc-char-rate-own', type: 'checkbox', checked: draft.voice.rate !== null,
+                  onChange: (event) => { characters.setDraftVoice({ rate: event.target.checked ? 1 : null }) },
+                }),
+                h('span', { className: 'dvc-set-label' }, t('characters.rateOwn'))),
+              draft.voice.rate === null
+                ? h('p', { className: 'dvc-set-note' }, t('characters.rateFollow', { value: Number(state.settingsRate).toFixed(2) }))
+                : h('div', null,
+                    h('label', { className: 'dvc-set-label', htmlFor: 'dvc-char-rate' },
+                      t('characters.rate'), h('output', { className: 'dvc-set-value' }, Number(draft.voice.rate).toFixed(2))),
+                    h('input', {
+                      id: 'dvc-char-rate', className: 'dvc-set-range', type: 'range', min: '0.5', max: '2', step: '0.05',
+                      value: String(draft.voice.rate),
+                      onChange: (event) => { characters.setDraftVoice({ rate: Number(event.target.value) }) },
+                    }),
+                    h('p', { className: 'dvc-set-note' }, t('characters.rateHint')))),
             h('div', { className: 'dvc-set-row' },
               h('button', {
                 type: 'button', className: 'dvc-set-primary',
@@ -1786,7 +1817,10 @@
                 : h('span', { className: 'dvc-char-avatar dvc-char-fallback' }, (character.name || '?').slice(0, 1)),
               h('div', { className: 'dvc-char-body' },
                 h('span', { className: 'dvc-char-name' }, character.name),
-                h('span', { className: 'dvc-char-desc' }, character.personality === '' ? t('characters.voice') : character.personality)),
+                h('span', { className: 'dvc-char-desc' }, character.personality === '' ? t('characters.voice') : character.personality),
+                character.voice?.rate === null || character.voice?.rate === undefined
+                  ? null
+                  : h('span', { className: 'dvc-char-desc' }, `${t('characters.rate')}: ${Number(character.voice.rate).toFixed(2)}`)),
               h('div', { className: 'dvc-char-actions' },
                 character.id === state.activeId
                   ? h('span', { className: 'dvc-set-ok' }, t('characters.active'))

@@ -64,6 +64,9 @@
           'settings.cloneGroup': 'Cloned voices',
           'settings.noLocal': 'No local voice models found.',
           'settings.noClone': 'No cloned voices yet. Upload a recording below.',
+          'settings.voiceRemove': 'Remove this voice',
+          'settings.voiceRemoveConfirm': 'Remove the voice "{name}"? Its recording is deleted from this machine.',
+          'settings.voiceRemoved': 'The voice "{name}" was removed.',
           'settings.clone': 'Clone a voice from a recording',
           'settings.cloneHint': 'Upload 6-30 seconds of clear speech in any common audio format (MP3, M4A, WAV, OGG, FLAC). It is converted on this machine and never uploaded anywhere.',
           'settings.cloneName': 'Name for this voice',
@@ -174,6 +177,9 @@
           'settings.cloneGroup': '复刻声线',
           'settings.noLocal': '没有找到本地声线模型。',
           'settings.noClone': '还没有复刻声线。在下面上传一段录音即可。',
+          'settings.voiceRemove': '移除此声线',
+          'settings.voiceRemoveConfirm': '移除声线"{name}"？它在本机的录音会被删除。',
+          'settings.voiceRemoved': '声线"{name}"已移除。',
           'settings.clone': '上传录音生成声线',
           'settings.cloneHint': '上传 6-30 秒清晰的说话录音，常见音频格式都行（MP3、M4A、WAV、OGG、FLAC）。转换在本机完成，录音不会上传到任何地方。',
           'settings.cloneName': '给这个声线起个名字',
@@ -1392,6 +1398,28 @@
           }
         }
         /**
+         * Delete one cloned voice and its recording.
+         *
+         * The Host clears the selection when it deleted the voice that was in
+         * use, so the reload below shows the resolved fallback rather than a
+         * voice that no longer exists.
+         *
+         * @param id - clone id.
+         * @param name - display name, for the confirmation and the notice.
+         */
+        const removeVoice = async (id, name) => {
+          store.set({ saving: true, notice: null })
+          try {
+            const response = await fetch(`/.dsh-voice-call/voices/${encodeURIComponent(id)}`, { method: 'DELETE' })
+            const body = await response.json().catch(() => null)
+            if (!response.ok) throw new Error(body?.error ?? `HTTP ${String(response.status)}`)
+            await load()
+            store.set({ saving: false, notice: { key: 'settings.voiceRemoved', params: { name } } })
+          } catch (error) {
+            store.set({ saving: false, notice: { key: 'settings.cloneFailed', params: { message: String(error?.message ?? error) } } })
+          }
+        }
+        /**
          * Upload one image as the call picture.
          *
          * The bytes go up with their media type in the header rather than as a
@@ -1428,7 +1456,7 @@
             store.set({ saving: false, notice: { key: 'settings.avatarFailed', params: { message: String(error?.message ?? error) } } })
           }
         }
-        return { store, load, write, clone, uploadAvatar, clearAvatar }
+        return { store, load, write, clone, removeVoice, uploadAvatar, clearAvatar }
       }
 
       /**
@@ -1659,11 +1687,28 @@
             h('div', { className: 'dvc-set-group' }, t('settings.cloneGroup')),
             clones.length === 0
               ? h('p', { className: 'dvc-set-note' }, t('settings.noClone'))
-              : h('div', { className: 'dvc-set-choices' }, clones.map((voice) => h('button', {
-                  key: voice.id, type: 'button',
+              // Each cloned voice gets its own remove control. A wrapper is used
+              // rather than nesting one button in another, which is invalid HTML
+              // and would make the inner click ambiguous.
+              : h('div', { className: 'dvc-set-choices' }, clones.map((voice) => h('span', {
+                  key: voice.id, className: 'dvc-set-pair',
+                },
+                h('button', {
+                  type: 'button',
                   className: selected === voice.id ? 'dvc-set-choice dvc-set-on' : 'dvc-set-choice',
                   onClick: () => { choose(voice.id) },
-                }, voice.name)))),
+                }, voice.name),
+                h('button', {
+                  type: 'button', className: 'dvc-set-drop',
+                  disabled: state.saving,
+                  title: t('settings.voiceRemove'),
+                  'aria-label': `${t('settings.voiceRemove')}: ${voice.name}`,
+                  onClick: () => {
+                    if (window.confirm(t('settings.voiceRemoveConfirm', { name: voice.name }))) {
+                      void settings.removeVoice(voice.id, voice.name)
+                    }
+                  },
+                }, '\u00d7'))))),
           // Cloud voice.
           h('section', { className: 'dvc-set-block' },
             h('label', { className: 'dvc-set-label', htmlFor: 'dvc-cloud' }, t('settings.cloudVoice')),
@@ -1736,7 +1781,7 @@
             h('span', { className: 'dvc-set-label' }, t('characters.nav')),
             h(CharactersPanel, { characters, t })),
           state.notice === null ? null : h('p', {
-            className: ['settings.saved', 'settings.cloneOk', 'settings.cloneConverted', 'settings.avatarOk', 'settings.avatarCleared'].includes(state.notice.key) ? 'dvc-set-ok' : 'dvc-set-error',
+            className: ['settings.saved', 'settings.cloneOk', 'settings.cloneConverted', 'settings.voiceRemoved', 'settings.avatarOk', 'settings.avatarCleared'].includes(state.notice.key) ? 'dvc-set-ok' : 'dvc-set-error',
           }, t(state.notice.key, state.notice.params)))
       }
 
@@ -1922,6 +1967,10 @@
 .dvc-set-choices{display:flex;flex-wrap:wrap;gap:8px}
 .dvc-set-choice{padding:6px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;cursor:pointer}
 .dvc-set-choice:hover{border-color:var(--dsw-alias-border-l3)}
+.dvc-set-pair{display:inline-flex;align-items:stretch;gap:2px}
+.dvc-set-drop{display:grid;place-items:center;width:26px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:14px;line-height:1;cursor:pointer}
+.dvc-set-drop:hover{border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary)}
+.dvc-set-drop:disabled{opacity:.4;cursor:default}
 .dvc-set-on{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}
 .dvc-set-range{width:100%;accent-color:var(--dsw-alias-brand-primary)}
 .dvc-set-select,.dvc-set-text{width:100%;height:32px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px}

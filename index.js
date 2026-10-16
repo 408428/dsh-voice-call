@@ -356,6 +356,40 @@ function assertCharacterId(id) {
 }
 
 /**
+ * Reject a clone-voice id that would escape the clone directory.
+ *
+ * Ids arrive from the browser and name a directory to remove, so they are
+ * checked rather than trusted: `../../etc` would otherwise delete outside the
+ * store.
+ *
+ * @param id - candidate id.
+ * @returns the id.
+ * @throws {RequestError} when it is not a plain identifier.
+ */
+function assertCloneId(id) {
+  if (typeof id !== 'string' || !/^clone-[a-z0-9-]{1,64}$/.test(id)) {
+    throw new RequestError('Unknown voice', 404)
+  }
+  return id
+}
+
+/**
+ * Delete one cloned voice and its recording.
+ *
+ * @param ctx - plugin context, for the log line.
+ * @param config - validated plugin configuration.
+ * @param id - clone id.
+ * @returns the id that was removed.
+ */
+async function deleteCloneVoice(ctx, config, id) {
+  const home = join(localPaths(config).cloneDir, id)
+  if (!await readable(join(home, 'sample.wav'))) throw new RequestError('Unknown voice', 404)
+  await rm(home, { recursive: true, force: true })
+  ctx.logger.info(`voice-call deleted cloned voice ${id}`)
+  return id
+}
+
+/**
  * Read one character, or undefined when it does not exist.
  * @param config - validated plugin configuration.
  * @param id - character id.
@@ -586,10 +620,18 @@ async function saveClone(ctx, config, canonical, name) {
   const seconds = canonical.length / 32000
   const dir = localPaths(config).cloneDir
   // A time-ordered id keeps clones distinguishable without asking the user to
-  // invent a unique one, and sorting by it shows newest last.
-  const id = `clone-${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}`
+  // invent a unique one, and sorting by it shows newest last. Milliseconds and a
+  // random suffix are both needed: second precision collided for two uploads in
+  // the same second, and one silently overwrote the other, so a test that
+  // created two voices ended up with one.
+  const stamp = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 17)
+  const suffix = Math.random().toString(36).slice(2, 6)
+  const id = `clone-${stamp}-${suffix}`
   const home = join(dir, id)
-  await mkdir(home, { recursive: true })
+  // The parent is created first, then the voice directory without `recursive`,
+  // so a collision fails loudly instead of merging two voices into one.
+  await mkdir(dir, { recursive: true })
+  await mkdir(home, { recursive: false })
   await writeFile(join(home, 'sample.wav'), canonical)
   const label = name.trim() === '' ? id : name.trim().slice(0, 40)
   await writeFile(join(home, 'voice.json'), JSON.stringify({ name: label, at: new Date().toISOString(), seconds: Math.round(seconds * 10) / 10 }), 'utf8')
@@ -1918,6 +1960,29 @@ export function apply(ctx, config) {
           const { bytes, converted } = await toCanonicalWave(ctx, config, body, work)
           const created = await saveClone(ctx, config, bytes, name)
           json(res, 201, { voice: created, converted })
+          return
+        }
+        if (route.startsWith(`${ROUTE_PREFIX}/voices/`) && req.method === 'DELETE') {
+          const id = assertCloneId(route.slice(`${ROUTE_PREFIX}/voices/`.length))
+          await ensureVoice()
+          await deleteCloneVoice(ctx, config, id)
+          // A deleted voice must not stay selected, or the next call resolves a
+          // voice that is no longer there. The character's own copy of the
+          // selection is cleared too, since it may name the same voice.
+          let cleared = false
+          if (voice.cloneId === id) {
+            voice.cloneId = ''
+            voice.localVoiceId = voice.localVoiceId !== '' ? voice.localVoiceId : config.localTtsModel
+            cleared = true
+          }
+          if (character.record !== null && character.record.voice.cloneId === id) {
+            await updateCharacter(ctx, config, character.id, { voice: { cloneId: '' } })
+            await refreshCharacter()
+            cleared = true
+          }
+          voice.label = (await resolveVoice(ctx, config, effectiveVoice())).label
+          if (cleared) await persistVoice(ctx, voice, character)
+          json(res, 200, { deleted: id, cleared })
           return
         }
         if (route === `${ROUTE_PREFIX}/characters` && req.method === 'GET') {

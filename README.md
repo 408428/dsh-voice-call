@@ -241,6 +241,7 @@ tuned. Changes apply to the next call and survive a restart.
 | **Voice** | Local Piper voices (every `.onnx` pair under the voice directory) and cloned voices, in one list. |
 | **Cloud voice** | One of 12 system voices, used when no local voice is available. |
 | **Clone from a recording** | Upload 6–30 s of speech in any common audio format to create a voice. It is converted on this machine and never uploaded anywhere. |
+| **Remove a cloned voice** | The × beside a cloned voice deletes it and its recording. If it was in use, or a character named it, that selection is cleared rather than left pointing at a voice that is gone. |
 | **Allow the cloud to stand in** | Whether a local failure may fall back to the cloud voice and recognizer. See below. |
 | **Call picture** | Upload a PNG, JPEG, WebP, or GIF to replace the generated avatar. It is stored on this machine, and removing it restores the generated one. |
 

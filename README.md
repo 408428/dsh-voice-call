@@ -187,11 +187,17 @@ one:
 | **Personality** | Prose describing how it talks and behaves. It reaches the agent as `{{character_personality}}`. |
 | **Voice** | A local voice, a cloned voice, the cloud voice, or "follow the voice settings". |
 | **Speaking rate** | Its own pace, or follow the voice settings. |
-| **Picture** | Shown on the call screen in place of the generated avatar. |
+| **Picture** | Shown on the call screen in place of the generated avatar. A new character's picture is staged and attached when the character is saved, since there is no record to attach it to before that. |
 
 One character is **in use** at a time. Its voice wins over the voice settings
 above, because picking a character is meant to pick all three at once; the
 settings remain the fallback for a deployment that uses no characters.
+
+A call reads its picture from `/call-avatar`, which resolves to the active
+character's image when it has one and to the deployment's own otherwise. The
+settings page keeps reading `/avatar`, the global picture, so opening Settings
+while a character is in use still edits the deployment default rather than
+silently offering to replace the character's image.
 
 The call preset's persona refers to the character, so a call introduces itself
 correctly:

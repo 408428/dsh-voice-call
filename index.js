@@ -2035,6 +2035,29 @@ export function apply(ctx, config) {
           json(res, 200, { activeCharacter: character.id, voice: voice.label })
           return
         }
+        if (route === `${ROUTE_PREFIX}/call-avatar` && (req.method === 'GET' || req.method === 'HEAD')) {
+          // What a call should actually show: the active character's picture
+          // when it has one, otherwise the deployment's own. Kept separate from
+          // `/avatar` because the settings page must keep editing the GLOBAL
+          // picture even while a character is in use -- otherwise opening
+          // settings would silently offer to replace the character's image.
+          await refreshCharacter()
+          const fromCharacter = character.record === null ? undefined : await readCharacterAvatar(config, character.id)
+          const stored = fromCharacter ?? await readAvatar(config)
+          if (stored === undefined) {
+            if (req.method === 'HEAD') { res.writeHead(200, { 'x-avatar': 'none' }); res.end(); return }
+            json(res, 200, { avatar: null }, { 'cache-control': 'no-store' })
+            return
+          }
+          if (req.method === 'HEAD') { res.writeHead(200, { 'x-avatar': stored.type }); res.end(); return }
+          res.writeHead(200, {
+            'content-type': stored.type,
+            'cache-control': 'no-store',
+            'content-length': stored.bytes.length,
+          })
+          res.end(stored.bytes)
+          return
+        }
         if (route === `${ROUTE_PREFIX}/avatar` && (req.method === 'GET' || req.method === 'HEAD')) {
           // The overlay and the settings page both read the picture back through
           // this one route, so a change shows up in both without a second copy.

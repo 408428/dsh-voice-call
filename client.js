@@ -114,6 +114,8 @@
           'characters.avatar': 'Picture',
           'characters.avatarChoose': 'Choose an image',
           'characters.avatarClear': 'Remove picture',
+          'characters.avatarHint': 'Shown on the call screen while this character is in use. PNG, JPEG, WebP, or GIF, up to 4 MB. Stored on this machine.',
+          'characters.avatarChosen': 'A picture is ready to save',
           'characters.saved': 'Saved.',
           'characters.avatarOk': 'Picture updated.',
           'characters.failed': 'Could not save: {message}',
@@ -221,6 +223,8 @@
           'characters.avatar': '头像',
           'characters.avatarChoose': '选择图片',
           'characters.avatarClear': '移除头像',
+          'characters.avatarHint': '使用这个角色时显示在通话界面。支持 PNG、JPEG、WebP、GIF，最大 4 MB。只保存在本机。',
+          'characters.avatarChosen': '已选好图片，保存后生效',
           'characters.saved': '已保存。',
           'characters.avatarOk': '头像已更新。',
           'characters.failed': '保存失败：{message}',
@@ -1205,11 +1209,14 @@
           let live = true
           void (async () => {
             try {
-              const response = await fetch('/.dsh-voice-call/avatar', { method: 'HEAD' })
+              // The EFFECTIVE picture: the active character's when it has one,
+              // otherwise the deployment's own. Reading `/avatar` here would
+              // ignore a character entirely.
+              const response = await fetch('/.dsh-voice-call/call-avatar', { method: 'HEAD' })
               if (!live || !response.ok) return
               const type = response.headers.get('x-avatar')
               if (type === null || type === 'none') { setAvatar({ set: false, src: '' }); return }
-              setAvatar({ set: true, src: `/.dsh-voice-call/avatar?rev=${String(Date.now())}` })
+              setAvatar({ set: true, src: `/.dsh-voice-call/call-avatar?rev=${String(Date.now())}` })
             } catch { /* no picture is the same as an unreadable one */ }
           })()
           return () => { live = false }
@@ -1508,18 +1515,33 @@
             return null
           }
         }
-        return {
+        // Built as a named object so `save` can reach its own siblings: it
+        // uploads a staged picture through the same action the UI would use.
+        const api = {
           store, read, send,
           /** Start a new character from the current voice settings. */
-          beginCreate: () => store.set({ editing: 'new', draft: { name: '', personality: '', voice: { engine: '', localVoiceId: '', cloudVoice: '', cloneId: '', rate: null } } }),
+          beginCreate: () => store.set({ editing: 'new', draft: { name: '', personality: '', voice: { engine: '', localVoiceId: '', cloudVoice: '', cloneId: '', rate: null }, image: null, imagePreview: '', imageRemoved: false } }),
           /** Open one character for editing. */
-          beginEdit: (character) => store.set({ editing: character.id, draft: { name: character.name, personality: character.personality, voice: { ...character.voice, rate: character.voice?.rate ?? null } } }),
+          beginEdit: (character) => store.set({ editing: character.id, draft: { name: character.name, personality: character.personality, voice: { ...character.voice, rate: character.voice?.rate ?? null }, image: null, imagePreview: '', imageRemoved: false } }),
           /** Leave the editor without saving. */
           cancelEdit: () => store.set({ editing: '', draft: null }),
           /** Change one draft field. */
           setDraft: (patch) => store.set({ draft: { ...store.getSnapshot().draft, ...patch } }),
           /** Change one draft voice field. */
           setDraftVoice: (patch) => store.set({ draft: { ...store.getSnapshot().draft, voice: { ...store.getSnapshot().draft.voice, ...patch } } }),
+          /**
+           * Stage a picture for this character.
+           *
+           * Staged rather than uploaded at once: a character being created has no
+           * id yet, so there is nothing to attach the picture to. The save
+           * uploads it once the record exists.
+           *
+           * @param file - the chosen image.
+           * @param preview - a data URL for the preview, read by the caller.
+           */
+          setDraftImage: (file, preview) => store.set({ draft: { ...store.getSnapshot().draft, image: file, imagePreview: preview, imageRemoved: false } }),
+          /** Drop the picture, either one just staged or the stored one. */
+          clearDraftImage: () => store.set({ draft: { ...store.getSnapshot().draft, image: null, imagePreview: '', imageRemoved: true } }),
           /** Write the draft, creating or updating as the editor was opened. */
           save: async () => {
             const { editing, draft } = store.getSnapshot()
@@ -1529,6 +1551,12 @@
               ? await send('/.dsh-voice-call/characters', 'POST', payload)
               : await send(`/.dsh-voice-call/characters/${encodeURIComponent(editing)}`, 'PATCH', payload)
             if (result === null) return
+            // The picture is attached now that the character has an id. A
+            // failure here must not lose the fields that were just saved, so it
+            // is reported on its own and the roster still refreshes.
+            const id = result.character?.id ?? editing
+            if (draft.image !== null) await api.uploadAvatar(id, draft.image)
+            else if (draft.imageRemoved) await api.removeAvatar(id)
             store.set({ editing: '', draft: null, notice: { key: 'characters.saved' } })
             await read()
           },
@@ -1544,6 +1572,12 @@
             if (result === null) return
             store.set({ activeId: result.activeCharacter })
             await read()
+          },
+          /** Remove one character's stored picture. */
+          removeAvatar: async (id) => {
+            try {
+              await fetch(`/.dsh-voice-call/characters/${encodeURIComponent(id)}/avatar`, { method: 'DELETE' })
+            } catch { /* a picture that cannot be removed is reported by the roster refresh */ }
           },
           /** Upload one character's picture. */
           uploadAvatar: async (id, file) => {
@@ -1565,6 +1599,7 @@
             }
           },
         }
+        return api
       }
 
       /**
@@ -1768,6 +1803,37 @@
               clones.length > 0 ? h('optgroup', { label: t('settings.cloneGroup') },
                 clones.map((voice) => h('option', { key: voice.id, value: `clone:${voice.id}` }, voice.name))) : null),
               h('p', { className: 'dvc-set-note' }, t('characters.voiceHint'))),
+            // The picture. A new character has no id yet, so the file is staged
+            // here and uploaded by Save; an existing one shows what it has.
+            h('section', { className: 'dvc-set-block' },
+              h('span', { className: 'dvc-set-label' }, t('characters.avatar')),
+              h('p', { className: 'dvc-set-note' }, t('characters.avatarHint')),
+              h('div', { className: 'dvc-set-row' },
+                draft.imagePreview !== ''
+                  ? h('img', { className: 'dvc-set-avatar', src: draft.imagePreview, alt: '' })
+                  : draft.imageRemoved === false && state.editing !== 'new' && (state.characters.find((c) => c.id === state.editing)?.hasAvatar ?? false)
+                    ? h('img', { className: 'dvc-set-avatar', src: `/.dsh-voice-call/characters/${encodeURIComponent(state.editing)}/avatar`, alt: '' })
+                    : null,
+                h('label', { className: 'dvc-set-file' },
+                  h('input', {
+                    type: 'file', accept: 'image/png,image/jpeg,image/webp,image/gif',
+                    onChange: (event) => {
+                      const file = event.target.files?.[0] ?? null
+                      if (file === null) return
+                      // A local preview shows the choice before Save, which is
+                      // when the bytes actually reach the Host.
+                      const reader = new FileReader()
+                      reader.onload = () => { characters.setDraftImage(file, String(reader.result ?? '')) }
+                      reader.readAsDataURL(file)
+                    },
+                  }),
+                  draft.imagePreview === '' ? t('characters.avatarChoose') : t('characters.avatarChosen')),
+                draft.imagePreview !== '' || (draft.imageRemoved === false && state.editing !== 'new' && (state.characters.find((c) => c.id === state.editing)?.hasAvatar ?? false))
+                  ? h('button', {
+                      type: 'button', className: 'dvc-set-quiet',
+                      onClick: () => { characters.clearDraftImage() },
+                    }, t('characters.avatarClear'))
+                  : null)),
             // The pace. A checkbox decides whether the character has an opinion
             // at all, because "follow the settings" and "1.0" are different
             // answers and a bare slider cannot express the first.

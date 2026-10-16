@@ -178,8 +178,11 @@ A **character** is a personality, a voice, and a picture together. Choosing one
 chooses how a call behaves, sounds, and looks in a single action, instead of
 three separate settings that can drift apart.
 
-The **Characters** page in Settings lists the roster and opens an editor for each
-one:
+The **Voice call** settings page carries the roster and opens an editor for each
+character. Characters live on that page rather than their own because a character
+IS a voice, a picture, and a pace: the same page that sets those for the
+deployment is where they are set for a character, and splitting them put two
+halves of one decision behind two nav entries.
 
 | Field | What it does |
 | --- | --- |

@@ -88,7 +88,7 @@
           'settings.avatarCleared': 'The call picture was removed.',
           'settings.avatarFailed': 'Could not set the picture: {message}',
           'characters.nav': 'Characters',
-          'characters.intro': 'A character is a personality, a voice, and a picture together. Choose one and every call is placed as that character.',
+          'characters.intro': 'A character is a name, a personality, a voice, a picture, and a pace. Choose one and every call is placed as that character.',
           'characters.active': 'In use',
           'characters.use': 'Use this character',
           'characters.none': 'No character in use: calls use the voice settings above.',
@@ -197,7 +197,7 @@
           'settings.avatarCleared': '通话头像已移除。',
           'settings.avatarFailed': '设置头像失败：{message}',
           'characters.nav': '角色',
-          'characters.intro': '一个角色 = 性格 + 声线 + 头像。选中一个角色后，通话就以这个角色的身份进行。',
+          'characters.intro': '一个角色 = 名字 + 性格 + 声线 + 头像 + 语速。选中一个角色后，通话就以这个角色的身份进行。',
           'characters.active': '使用中',
           'characters.use': '使用这个角色',
           'characters.none': '当前没有使用角色：通话使用上面的声音设置。',
@@ -1607,12 +1607,14 @@
        * @param props - settings section props plus the injected controller.
        * @returns The voice settings section.
        */
-      function VoiceSettingsSection({ settings, t }) {
+      function VoiceSettingsSection({ settings, characters, t }) {
         const state = useSyncExternalStore(settings.store.subscribe, settings.store.getSnapshot, settings.store.getSnapshot)
         const [name, setName] = useState('')
         const [file, setFile] = useState(null)
         const [image, setImage] = useState(null)
         useEffect(() => { void settings.load() }, [settings])
+        // The characters block is its own controller, so it loads itself.
+        useEffect(() => { void characters.read() }, [characters])
         const pick = (event) => { setFile(event.target.files?.[0] ?? null) }
         const pickImage = (event) => { setImage(event.target.files?.[0] ?? null) }
         const local = state.voices.filter((voice) => voice.engine === 'piper')
@@ -1726,22 +1728,32 @@
                 disabled: file === null || state.saving,
                 onClick: () => { if (file !== null) void settings.clone(file, name) },
               }, state.saving ? t('settings.cloneWorking') : t('settings.cloneUpload')))),
+          // Characters, last: they build on the voices and the picture above, so
+          // the page reads as "how this deployment speaks, then who speaks".
+          h('section', { className: 'dvc-set-block' },
+            h('span', { className: 'dvc-set-label' }, t('characters.nav')),
+            h(CharactersPanel, { characters, t })),
           state.notice === null ? null : h('p', {
             className: ['settings.saved', 'settings.cloneOk', 'settings.cloneConverted', 'settings.avatarOk', 'settings.avatarCleared'].includes(state.notice.key) ? 'dvc-set-ok' : 'dvc-set-error',
           }, t(state.notice.key, state.notice.params)))
       }
 
       /**
-       * Render the characters page.
+       * Render the characters block inside the voice settings page.
        *
-       * The roster and the editor are the same page in two states: the editor
-       * replaces the list rather than opening a dialog, which keeps the whole
-       * flow inside the settings panel it already lives in.
+       * A block rather than a page of its own: a character IS a voice, a
+       * picture, and a pace, so the same page that sets those for the
+       * deployment is where they are set for a character. Splitting them put
+       * two halves of one decision behind two nav entries.
        *
-       * @param props - settings section props plus the injected roster.
-       * @returns The characters section.
+       * The roster and the editor are two states of the same block: the editor
+       * replaces the list rather than opening a dialog, which keeps the flow
+       * inside the settings panel it already lives in.
+       *
+       * @param props - the roster controller and the translator.
+       * @returns The characters block.
        */
-      function CharactersSection({ characters, t }) {
+      function CharactersPanel({ characters, t }) {
         const state = useSyncExternalStore(characters.store.subscribe, characters.store.getSnapshot, characters.store.getSnapshot)
         const [image, setImage] = useState(null)
         useEffect(() => { void characters.read() }, [characters])
@@ -1750,9 +1762,9 @@
         const notice = state.notice === null ? null : h('p', {
           className: state.notice.key === 'characters.failed' ? 'dvc-set-error' : 'dvc-set-ok',
         }, t(state.notice.key, state.notice.params))
-        if (state.loading) return h('div', { className: 'dvc-set' }, h('p', { className: 'dvc-set-note' }, t('settings.loading')))
+        if (state.loading) return h('p', { className: 'dvc-set-note' }, t('settings.loading'))
         if (state.error !== null) {
-          return h('div', { className: 'dvc-set' }, h('p', { className: 'dvc-set-error' }, t('settings.loadFailed', { message: state.error })))
+          return h('p', { className: 'dvc-set-error' }, t('settings.loadFailed', { message: state.error }))
         }
         // The editor.
         if (editing && draft !== null) {
@@ -1773,8 +1785,7 @@
               ? { engine: 'clone', cloneId: id, localVoiceId: '' }
               : { engine: 'local', localVoiceId: id, cloneId: '' })
           }
-          return h('div', { className: 'dvc-set' },
-            h('style', null, SETTINGS_CSS),
+          return h('div', { className: 'dvc-char-edit' },
             h('section', { className: 'dvc-set-block' },
               h('label', { className: 'dvc-set-label', htmlFor: 'dvc-char-name' }, t('characters.name')),
               h('input', {
@@ -1868,9 +1879,8 @@
             notice)
         }
         // The roster.
-        return h('div', { className: 'dvc-set' },
-          h('style', null, SETTINGS_CSS),
-          h('p', { className: 'dvc-set-intro' }, t('characters.intro')),
+        return h('div', { className: 'dvc-char-edit' },
+          h('p', { className: 'dvc-set-note' }, t('characters.intro')),
           h('p', { className: 'dvc-set-note' }, state.activeId === '' ? t('characters.none') : `${t('characters.active')}: ${state.characters.find((c) => c.id === state.activeId)?.name ?? state.activeId}`),
           state.characters.length === 0
             ? h('p', { className: 'dvc-set-note' }, t('characters.empty'))
@@ -1924,6 +1934,7 @@
 .dvc-set-switch input{width:16px;height:16px;accent-color:var(--dsw-alias-brand-primary)}
 .dvc-set-switch .dvc-set-label{font-weight:500}
 .dvc-set-area{width:100%;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:1.6;resize:vertical}
+.dvc-char-edit{display:flex;flex-direction:column;gap:14px;padding:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-base)}
 .dvc-char-list{display:flex;flex-direction:column;gap:10px}
 .dvc-char{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px}
 .dvc-char-on{border-color:var(--dsw-alias-brand-primary)}
@@ -2049,21 +2060,17 @@
           name: 'sidebar.footer.action', id: 'voice-call', order: 20, locale: NS,
           inject: () => ({ call: face }),
         }, VoiceCallButton))
-        // The settings page owns how the plugin speaks: rate, voice, and cloning.
+        // One page owns how this plugin speaks: the rate, the voices, the
+        // picture, and the characters that combine them. Characters were briefly
+        // a page of their own, but a character IS a voice, a picture, and a
+        // pace, so two nav entries split one decision in half.
         const settings = createVoiceSettings(ctx, t)
+        const characters = createCharacters(t)
         ctx.slots.inject('settings.section', () => ctx.slots.register({
           name: 'settings.section', id: 'voice-call', order: 25,
           label: () => t('settings.nav'), locale: NS,
-          inject: () => ({ settings }),
+          inject: () => ({ settings, characters }),
         }, VoiceSettingsSection))
-        // Characters get their own page: a character is a whole persona rather
-        // than another voice option, so it does not belong inside the voice page.
-        const characters = createCharacters(t)
-        ctx.slots.inject('settings.section', () => ctx.slots.register({
-          name: 'settings.section', id: 'voice-call-characters', order: 26,
-          label: () => t('characters.nav'), locale: NS,
-          inject: () => ({ characters }),
-        }, CharactersSection))
       }
 
       return { name: 'voice-call', inject, apply }

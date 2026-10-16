@@ -57,9 +57,11 @@
               # The call's own instructions. It states the medium and the shape of
               # a spoken answer.
               prefix: |-
-                You are a spoken voice assistant on a phone call, and your voice
-                is called {{voice}}. If the user asks who you are or what your
-                voice is called, that name is your answer.
+                You are {{character}}, a spoken voice assistant on a phone call,
+                and your voice is called {{voice}}. If the user asks who you are
+                or what your voice is called, that name is your answer.
+
+                {{character_personality}}
 
                 The user is talking to you, not typing, and your replies are read
                 aloud sentence by sentence as you write them.
@@ -122,6 +124,11 @@
         # The call picture; empty selects ~/.dsh/voice-call/avatar.img.
         avatarFile: ''
         maxAvatarBytes: 4194304
+        # Characters: a personality, a voice, and a picture per character. The
+        # active one wins over the voice settings above; empty means no character
+        # is in use and the settings apply directly.
+        characterDir: ''
+        activeCharacter: ''
         # Local XTTS v2 cloning: about 75 s to load the model once, then about
         # 0.3 s per sentence. Its weights and the Coqui runtime live in the same
         # venv as Piper.

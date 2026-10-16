@@ -172,6 +172,44 @@ is unusable:
 When the default answers, nothing is selected at all and the call runs exactly
 as the deployment intends.
 
+## Characters
+
+A **character** is a personality, a voice, and a picture together. Choosing one
+chooses how a call behaves, sounds, and looks in a single action, instead of
+three separate settings that can drift apart.
+
+The **Characters** page in Settings lists the roster and opens an editor for each
+one:
+
+| Field | What it does |
+| --- | --- |
+| **Name** | What the character is called, and what it answers with when asked who it is. |
+| **Personality** | Prose describing how it talks and behaves. It reaches the agent as `{{character_personality}}`. |
+| **Voice** | A local voice, a cloned voice, the cloud voice, or "follow the voice settings". |
+| **Picture** | Shown on the call screen in place of the generated avatar. |
+
+One character is **in use** at a time. Its voice wins over the voice settings
+above, because picking a character is meant to pick all three at once; the
+settings remain the fallback for a deployment that uses no characters.
+
+The call preset's persona refers to the character, so a call introduces itself
+correctly:
+
+```
+You are {{character}}, a spoken voice assistant on a phone call,
+and your voice is called {{voice}}.
+
+{{character_personality}}
+```
+
+With no character in use, `{{character}}` resolves to a generic assistant rather
+than an empty name, so the sentence still reads.
+
+A character's **engine is stored explicitly**, which is what makes "cloud voice"
+distinguishable from "no voice named": the first is a decision, the second means
+follow the deployment's settings. Without that, a character asking for the cloud
+voice would silently get the local default.
+
 ## Voice settings
 
 The plugin adds a **Voice call** page to Settings, where the voice is chosen and
@@ -281,6 +319,10 @@ unavailable; the local and cloud voices are unaffected.
   faster model for you; it only switches when the configured one cannot answer,
   because moving the conversation onto another model is not the plugin's
   decision to make. Probing costs one request, cached for `routeTtlMs`.
+- **A character's voice overrides the voice settings while it is in use.** The
+  rate and the cloud-fallback switch are deployment-wide and are not per
+  character, because they describe how this machine speaks rather than who is
+  speaking.
 - **A clone upload is converted with ffmpeg.** The plugin runs `ffmpeg` from
   `PATH`; set `ffmpegPath` if it lives elsewhere. Without ffmpeg, only a file
   that is already 16 kHz mono PCM16 WAV can be used, and the upload reports why.

@@ -87,7 +87,33 @@
           'settings.avatarOk': 'The call picture is set.',
           'settings.avatarCleared': 'The call picture was removed.',
           'settings.avatarFailed': 'Could not set the picture: {message}',
-          'settings.fallback': 'Allow the cloud to stand in',
+          'characters.nav': 'Characters',
+          'characters.intro': 'A character is a personality, a voice, and a picture together. Choose one and every call is placed as that character.',
+          'characters.active': 'In use',
+          'characters.use': 'Use this character',
+          'characters.none': 'No character in use: calls use the voice settings above.',
+          'characters.empty': 'No characters yet. Create one to give a call its own personality, voice, and picture.',
+          'characters.create': 'New character',
+          'characters.edit': 'Edit',
+          'characters.delete': 'Delete',
+          'characters.save': 'Save',
+          'characters.cancel': 'Cancel',
+          'characters.name': 'Name',
+          'characters.namePlaceholder': 'For example: 灰原哀',
+          'characters.personality': 'Personality',
+          'characters.personalityHint': 'How this character talks and behaves. Written into the call instructions as {{character_personality}}.',
+          'characters.personalityPlaceholder': 'For example: 说话简洁冷静，偶尔带点毒舌，但本质上是关心对方的。',
+          'characters.voice': 'Voice',
+          'characters.voiceHint': 'Which voice this character speaks with. The cloud voice follows the cloud-voice setting below.',
+          'characters.voiceDefault': 'Follow the voice settings',
+          'characters.cloudVoice': 'Cloud voice',
+          'characters.avatar': 'Picture',
+          'characters.avatarChoose': 'Choose an image',
+          'characters.avatarClear': 'Remove picture',
+          'characters.saved': 'Saved.',
+          'characters.avatarOk': 'Picture updated.',
+          'characters.failed': 'Could not save: {message}',
+          'characters.confirmDelete': 'Delete this character? Its picture and settings are removed.',
           'settings.fallbackOn': 'On: if a local engine is missing or fails, the cloud voice and recognizer are used instead.',
           'settings.fallbackOff': 'Off: a call stays entirely local. If a local engine fails, the call reports it instead of sending audio to a cloud API.',
           'call.newTitle': 'New voice call',
@@ -164,7 +190,33 @@
           'settings.avatarOk': '通话头像已设置。',
           'settings.avatarCleared': '通话头像已移除。',
           'settings.avatarFailed': '设置头像失败：{message}',
-          'settings.fallback': '本地不可用时使用云端',
+          'characters.nav': '角色',
+          'characters.intro': '一个角色 = 性格 + 声线 + 头像。选中一个角色后，通话就以这个角色的身份进行。',
+          'characters.active': '使用中',
+          'characters.use': '使用这个角色',
+          'characters.none': '当前没有使用角色：通话使用上面的声音设置。',
+          'characters.empty': '还没有角色。新建一个，让它有自己的性格、声线和头像。',
+          'characters.create': '新建角色',
+          'characters.edit': '编辑',
+          'characters.delete': '删除',
+          'characters.save': '保存',
+          'characters.cancel': '取消',
+          'characters.name': '名字',
+          'characters.namePlaceholder': '例如：灰原哀',
+          'characters.personality': '性格',
+          'characters.personalityHint': '这个角色怎么说话、怎么表现。会作为 {{character_personality}} 写进通话指令。',
+          'characters.personalityPlaceholder': '例如：说话简洁冷静，偶尔带点毒舌，但本质上是关心对方的。',
+          'characters.voice': '声线',
+          'characters.voiceHint': '这个角色用哪个声音说话。选「云端声线」时使用下面的云端声线设置。',
+          'characters.voiceDefault': '跟随声音设置',
+          'characters.cloudVoice': '云端声线',
+          'characters.avatar': '头像',
+          'characters.avatarChoose': '选择图片',
+          'characters.avatarClear': '移除头像',
+          'characters.saved': '已保存。',
+          'characters.avatarOk': '头像已更新。',
+          'characters.failed': '保存失败：{message}',
+          'characters.confirmDelete': '删除这个角色？它的头像和设置会一起删除。',
           'settings.fallbackOn': '开启：本地引擎缺失或失败时，改用云端声线和识别。',
           'settings.fallbackOff': '关闭：通话完全在本地进行。本地引擎失败时会直接报错，而不会把音频发往云端 API。',
           'call.newTitle': '新的语音通话',
@@ -1382,6 +1434,130 @@
       }
 
       /**
+       * Characters controller.
+       *
+       * A character bundles a personality, a voice, and a picture, so choosing
+       * one chooses how a call behaves, sounds, and looks in a single action.
+       * The roster is Host state: this store only mirrors it and forwards edits.
+       *
+       * @param t - namespace-bound translator.
+       * @returns the roster store and its actions.
+       */
+      function createCharacters(t) {
+        const store = createStore({
+          loading: true,
+          error: null,
+          characters: [],
+          activeId: '',
+          voices: [],
+          cloudVoices: [],
+          /** Id of the character open for editing, or '' for the roster. */
+          editing: '',
+          /** The draft being edited, so typing does not write on every keystroke. */
+          draft: null,
+          saving: false,
+          notice: null,
+        })
+        const read = async () => {
+          try {
+            const response = await fetch('/.dsh-voice-call/characters')
+            if (!response.ok) throw new Error(`HTTP ${String(response.status)}`)
+            const body = await response.json()
+            store.set({
+              loading: false,
+              error: null,
+              characters: body.characters ?? [],
+              activeId: body.activeCharacter ?? '',
+              voices: body.voices ?? [],
+              cloudVoices: body.cloudVoices ?? [],
+            })
+          } catch (error) {
+            store.set({ loading: false, error: String(error?.message ?? error) })
+          }
+        }
+        /**
+         * Send one request and report the outcome in the store.
+         * @param path - route path.
+         * @param method - HTTP method.
+         * @param body - JSON body, when the request has one.
+         * @returns the parsed reply, or null on failure.
+         */
+        const send = async (path, method, body) => {
+          store.set({ saving: true, notice: null })
+          try {
+            const response = await fetch(path, {
+              method,
+              ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+            })
+            const parsed = await response.json().catch(() => null)
+            if (!response.ok) throw new Error(parsed?.error ?? `HTTP ${String(response.status)}`)
+            store.set({ saving: false })
+            return parsed
+          } catch (error) {
+            store.set({ saving: false, notice: { key: 'characters.failed', params: { message: String(error?.message ?? error) } } })
+            return null
+          }
+        }
+        return {
+          store, read, send,
+          /** Start a new character from the current voice settings. */
+          beginCreate: () => store.set({ editing: 'new', draft: { name: '', personality: '', voice: { engine: '', localVoiceId: '', cloudVoice: '', cloneId: '' } } }),
+          /** Open one character for editing. */
+          beginEdit: (character) => store.set({ editing: character.id, draft: { name: character.name, personality: character.personality, voice: { ...character.voice } } }),
+          /** Leave the editor without saving. */
+          cancelEdit: () => store.set({ editing: '', draft: null }),
+          /** Change one draft field. */
+          setDraft: (patch) => store.set({ draft: { ...store.getSnapshot().draft, ...patch } }),
+          /** Change one draft voice field. */
+          setDraftVoice: (patch) => store.set({ draft: { ...store.getSnapshot().draft, voice: { ...store.getSnapshot().draft.voice, ...patch } } }),
+          /** Write the draft, creating or updating as the editor was opened. */
+          save: async () => {
+            const { editing, draft } = store.getSnapshot()
+            if (draft === null) return
+            const payload = { name: draft.name, personality: draft.personality, voice: draft.voice }
+            const result = editing === 'new'
+              ? await send('/.dsh-voice-call/characters', 'POST', payload)
+              : await send(`/.dsh-voice-call/characters/${encodeURIComponent(editing)}`, 'PATCH', payload)
+            if (result === null) return
+            store.set({ editing: '', draft: null, notice: { key: 'characters.saved' } })
+            await read()
+          },
+          /** Delete one character. */
+          remove: async (id) => {
+            const result = await send(`/.dsh-voice-call/characters/${encodeURIComponent(id)}`, 'DELETE')
+            if (result === null) return
+            await read()
+          },
+          /** Make one character the one calls are placed as. */
+          activate: async (id) => {
+            const result = await send('/.dsh-voice-call/active-character', 'POST', { id })
+            if (result === null) return
+            store.set({ activeId: result.activeCharacter })
+            await read()
+          },
+          /** Upload one character's picture. */
+          uploadAvatar: async (id, file) => {
+            store.set({ saving: true, notice: null })
+            try {
+              const response = await fetch(`/.dsh-voice-call/characters/${encodeURIComponent(id)}/avatar`, {
+                method: 'POST',
+                headers: { 'content-type': file.type || 'image/png' },
+                body: await file.arrayBuffer(),
+              })
+              if (!response.ok) {
+                const parsed = await response.json().catch(() => null)
+                throw new Error(parsed?.error ?? `HTTP ${String(response.status)}`)
+              }
+              store.set({ saving: false, notice: { key: 'characters.avatarOk' } })
+              await read()
+            } catch (error) {
+              store.set({ saving: false, notice: { key: 'characters.failed', params: { message: String(error?.message ?? error) } } })
+            }
+          },
+        }
+      }
+
+      /**
        * Render the voice settings page.
        * @param props - settings section props plus the injected controller.
        * @returns The voice settings section.
@@ -1510,6 +1686,118 @@
           }, t(state.notice.key, state.notice.params)))
       }
 
+      /**
+       * Render the characters page.
+       *
+       * The roster and the editor are the same page in two states: the editor
+       * replaces the list rather than opening a dialog, which keeps the whole
+       * flow inside the settings panel it already lives in.
+       *
+       * @param props - settings section props plus the injected roster.
+       * @returns The characters section.
+       */
+      function CharactersSection({ characters, t }) {
+        const state = useSyncExternalStore(characters.store.subscribe, characters.store.getSnapshot, characters.store.getSnapshot)
+        const [image, setImage] = useState(null)
+        useEffect(() => { void characters.read() }, [characters])
+        const draft = state.draft
+        const editing = state.editing !== ''
+        const notice = state.notice === null ? null : h('p', {
+          className: state.notice.key === 'characters.failed' ? 'dvc-set-error' : 'dvc-set-ok',
+        }, t(state.notice.key, state.notice.params))
+        if (state.loading) return h('div', { className: 'dvc-set' }, h('p', { className: 'dvc-set-note' }, t('settings.loading')))
+        if (state.error !== null) {
+          return h('div', { className: 'dvc-set' }, h('p', { className: 'dvc-set-error' }, t('settings.loadFailed', { message: state.error })))
+        }
+        // The editor.
+        if (editing && draft !== null) {
+          const clones = state.voices.filter((voice) => voice.engine === 'clone')
+          const locals = state.voices.filter((voice) => voice.engine === 'piper')
+          const chosen = draft.voice.engine === 'cloud' ? 'cloud:'
+            : draft.voice.cloneId !== '' ? `clone:${draft.voice.cloneId}`
+              : draft.voice.localVoiceId !== '' ? `local:${draft.voice.localVoiceId}` : ''
+          // The engine is stored explicitly: choosing the cloud voice has to be
+          // distinguishable from naming no voice at all, or the local default
+          // would win and the character's choice would silently do nothing.
+          const pickVoice = (value) => {
+            if (value === '') { characters.setDraftVoice({ engine: '', cloneId: '', localVoiceId: '' }); return }
+            const kind = value.slice(0, value.indexOf(':'))
+            const id = value.slice(value.indexOf(':') + 1)
+            if (kind === 'cloud') { characters.setDraftVoice({ engine: 'cloud', cloneId: '', localVoiceId: '' }); return }
+            characters.setDraftVoice(kind === 'clone'
+              ? { engine: 'clone', cloneId: id, localVoiceId: '' }
+              : { engine: 'local', localVoiceId: id, cloneId: '' })
+          }
+          return h('div', { className: 'dvc-set' },
+            h('style', null, SETTINGS_CSS),
+            h('section', { className: 'dvc-set-block' },
+              h('label', { className: 'dvc-set-label', htmlFor: 'dvc-char-name' }, t('characters.name')),
+              h('input', {
+                id: 'dvc-char-name', className: 'dvc-set-text', type: 'text', value: draft.name,
+                placeholder: t('characters.namePlaceholder'),
+                onChange: (event) => { characters.setDraft({ name: event.target.value }) },
+              })),
+            h('section', { className: 'dvc-set-block' },
+              h('label', { className: 'dvc-set-label', htmlFor: 'dvc-char-personality' }, t('characters.personality')),
+              h('textarea', {
+                id: 'dvc-char-personality', className: 'dvc-set-area', rows: '5', value: draft.personality,
+                placeholder: t('characters.personalityPlaceholder'),
+                onChange: (event) => { characters.setDraft({ personality: event.target.value }) },
+              }),
+              h('p', { className: 'dvc-set-note' }, t('characters.personalityHint'))),
+            h('section', { className: 'dvc-set-block' },
+              h('label', { className: 'dvc-set-label', htmlFor: 'dvc-char-voice' }, t('characters.voice')),
+              h('select', {
+                id: 'dvc-char-voice', className: 'dvc-set-select', value: chosen,
+                onChange: (event) => { pickVoice(event.target.value) },
+              },
+              h('option', { value: '' }, t('characters.voiceDefault')),
+              h('option', { value: 'cloud:' }, t('settings.cloudVoice')),
+              locals.length > 0 ? h('optgroup', { label: t('settings.localGroup') },
+                locals.map((voice) => h('option', { key: voice.id, value: `local:${voice.id}` }, voice.name))) : null,
+              clones.length > 0 ? h('optgroup', { label: t('settings.cloneGroup') },
+                clones.map((voice) => h('option', { key: voice.id, value: `clone:${voice.id}` }, voice.name))) : null),
+              h('p', { className: 'dvc-set-note' }, t('characters.voiceHint'))),
+            h('div', { className: 'dvc-set-row' },
+              h('button', {
+                type: 'button', className: 'dvc-set-primary',
+                disabled: state.saving,
+                onClick: () => { void characters.save() },
+              }, state.saving ? t('settings.cloneWorking') : t('characters.save')),
+              h('button', {
+                type: 'button', className: 'dvc-set-quiet',
+                onClick: () => { characters.cancelEdit() },
+              }, t('characters.cancel'))),
+            notice)
+        }
+        // The roster.
+        return h('div', { className: 'dvc-set' },
+          h('style', null, SETTINGS_CSS),
+          h('p', { className: 'dvc-set-intro' }, t('characters.intro')),
+          h('p', { className: 'dvc-set-note' }, state.activeId === '' ? t('characters.none') : `${t('characters.active')}: ${state.characters.find((c) => c.id === state.activeId)?.name ?? state.activeId}`),
+          state.characters.length === 0
+            ? h('p', { className: 'dvc-set-note' }, t('characters.empty'))
+            : h('div', { className: 'dvc-char-list' }, state.characters.map((character) => h('div', {
+                key: character.id,
+                className: character.id === state.activeId ? 'dvc-char dvc-char-on' : 'dvc-char',
+              },
+              character.hasAvatar
+                ? h('img', { className: 'dvc-char-avatar', src: `/.dsh-voice-call/characters/${encodeURIComponent(character.id)}/avatar`, alt: '' })
+                : h('span', { className: 'dvc-char-avatar dvc-char-fallback' }, (character.name || '?').slice(0, 1)),
+              h('div', { className: 'dvc-char-body' },
+                h('span', { className: 'dvc-char-name' }, character.name),
+                h('span', { className: 'dvc-char-desc' }, character.personality === '' ? t('characters.voice') : character.personality)),
+              h('div', { className: 'dvc-char-actions' },
+                character.id === state.activeId
+                  ? h('span', { className: 'dvc-set-ok' }, t('characters.active'))
+                  : h('button', { type: 'button', className: 'dvc-set-primary', disabled: state.saving, onClick: () => { void characters.activate(character.id) } }, t('characters.use')),
+                h('button', { type: 'button', className: 'dvc-set-quiet', onClick: () => { characters.beginEdit(character) } }, t('characters.edit')),
+                h('button', { type: 'button', className: 'dvc-set-quiet', onClick: () => { if (window.confirm(t('characters.confirmDelete'))) void characters.remove(character.id) } }, t('characters.delete')))))),
+          h('div', { className: 'dvc-set-row' },
+            h('button', { type: 'button', className: 'dvc-set-primary', onClick: () => { characters.beginCreate() } }, t('characters.create'))),
+          notice)
+      }
+
       /** Styles for the settings page; scoped by the section's own class names. */
       const SETTINGS_CSS = `
 .dvc-set{display:flex;flex-direction:column;gap:18px;max-width:640px;padding:4px 2px 24px}
@@ -1535,6 +1823,15 @@
 .dvc-set-switch{display:flex;align-items:center;gap:8px;cursor:pointer}
 .dvc-set-switch input{width:16px;height:16px;accent-color:var(--dsw-alias-brand-primary)}
 .dvc-set-switch .dvc-set-label{font-weight:500}
+.dvc-set-area{width:100%;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:1.6;resize:vertical}
+.dvc-char-list{display:flex;flex-direction:column;gap:10px}
+.dvc-char{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px}
+.dvc-char-on{border-color:var(--dsw-alias-brand-primary)}
+.dvc-char-avatar{display:grid;place-items:center;width:40px;height:40px;border-radius:999px;object-fit:cover;flex:0 0 auto;font-size:16px;font-weight:600;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-secondary)}
+.dvc-char-body{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+.dvc-char-name{color:var(--dsw-alias-label-primary);font-size:13px;font-weight:600}
+.dvc-char-desc{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1.5;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.dvc-char-actions{display:flex;align-items:center;gap:8px;flex:0 0 auto}
 .dvc-set-quiet{padding:6px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;cursor:pointer}
 .dvc-set-quiet:hover{color:var(--dsw-alias-label-primary)}
 .dvc-set-error{margin:0;color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:1.6}
@@ -1659,6 +1956,14 @@
           label: () => t('settings.nav'), locale: NS,
           inject: () => ({ settings }),
         }, VoiceSettingsSection))
+        // Characters get their own page: a character is a whole persona rather
+        // than another voice option, so it does not belong inside the voice page.
+        const characters = createCharacters(t)
+        ctx.slots.inject('settings.section', () => ctx.slots.register({
+          name: 'settings.section', id: 'voice-call-characters', order: 26,
+          label: () => t('characters.nav'), locale: NS,
+          inject: () => ({ characters }),
+        }, CharactersSection))
       }
 
       return { name: 'voice-call', inject, apply }

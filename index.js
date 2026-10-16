@@ -103,6 +103,13 @@ export const Config = z.object({
   voiceDir: z.string().default(''),
   /** Directory holding uploaded reference recordings for cloning. */
   cloneDir: z.string().default(''),
+  /** Directory holding characters; empty selects the default under the Harness home. */
+  characterDir: z.string().default(''),
+  /**
+   * The character a call is placed as; empty means no character is selected and
+   * the voice settings above apply directly.
+   */
+  activeCharacter: z.string().default('').volatile(),
   /** Absolute path of the uploaded avatar image; empty selects the default under the Harness home. */
   avatarFile: z.string().default(''),
   /** Largest accepted avatar upload, in bytes. */
@@ -228,6 +235,7 @@ async function loadVoiceSettings(ctx, voice) {
     if (typeof saved.cloudVoice === 'string') voice.cloudVoice = saved.cloudVoice
     if (typeof saved.cloneId === 'string') voice.cloneId = saved.cloneId
     if (typeof saved.cloudFallback === 'boolean') voice.cloudFallback = saved.cloudFallback
+    if (typeof saved.activeCharacter === 'string') character.id = saved.activeCharacter
   } catch (error) {
     ctx.logger.warn('voice-call could not read saved voice settings; using defaults', error)
   }
@@ -251,8 +259,7 @@ const AVATAR_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gi
  * @param config - validated plugin configuration.
  * @returns the image and its type, or undefined when none is set.
  */
-async function readAvatar(config) {
-  const path = localPaths(config).avatar
+async function readAvatarAt(path) {
   try {
     const bytes = await readFile(path)
     if (bytes.length === 0) return undefined
@@ -267,6 +274,16 @@ async function readAvatar(config) {
   } catch {
     return undefined
   }
+}
+
+/**
+ * Read the stored avatar, if any.
+ *
+ * @param config - validated plugin configuration.
+ * @returns the image and its type, or undefined when none is set.
+ */
+async function readAvatar(config) {
+  return await readAvatarAt(localPaths(config).avatar)
 }
 
 /**
@@ -294,6 +311,191 @@ async function clearAvatar(ctx, config) {
   await rm(path, { force: true })
   await rm(`${path}.type`, { force: true })
   ctx.logger.info('voice-call cleared the avatar')
+}
+
+/**
+ * One character: a name, a personality, a voice, and a picture.
+ *
+ * A character is the unit a call is placed as. Keeping the four together in one
+ * record is the point: choosing a character chooses how the agent behaves, how
+ * it sounds, and what it looks like, in one action rather than three.
+ *
+ * @typedef {object} Character
+ * @property {string} id - directory name, stable across renames.
+ * @property {string} name - display name, and what the agent calls itself.
+ * @property {string} personality - prose appended to the call instructions.
+ * @property {object} voice - the voice selection, in the same shape as settings.
+ * @property {boolean} hasAvatar - whether a picture is stored for this character.
+ */
+
+/** Directory holding every character. */
+function charactersDir(config) {
+  return config.characterDir || join(homeDir(), 'voice-call', 'characters')
+}
+
+/** Directory holding one character's files. */
+function characterDir(config, id) {
+  return join(charactersDir(config), id)
+}
+
+/**
+ * Reject a character id that would escape the characters directory.
+ *
+ * Ids arrive from the browser, so they are checked rather than trusted: an id
+ * like `../../etc` would otherwise name a directory outside the store.
+ *
+ * @param id - candidate id.
+ * @returns the id.
+ * @throws {RequestError} when it is not a plain identifier.
+ */
+function assertCharacterId(id) {
+  if (typeof id !== 'string' || !/^char-[a-z0-9-]{1,64}$/.test(id)) {
+    throw new RequestError('Unknown character', 404)
+  }
+  return id
+}
+
+/**
+ * Read one character, or undefined when it does not exist.
+ * @param config - validated plugin configuration.
+ * @param id - character id.
+ * @returns the character, with its voice selection and avatar presence.
+ */
+async function readCharacter(config, id) {
+  try {
+    const raw = JSON.parse(await readFile(join(characterDir(config, id), 'character.json'), 'utf8'))
+    return {
+      id,
+      name: typeof raw.name === 'string' && raw.name.trim() !== '' ? raw.name.trim() : id,
+      personality: typeof raw.personality === 'string' ? raw.personality : '',
+      voice: {
+        // Which engine the character chose. Stored explicitly because "no local
+        // voice named" is not the same as "the cloud was chosen": the first
+        // means use the deployment default, the second means use the cloud.
+        engine: ['local', 'clone', 'cloud'].includes(raw.voice?.engine) ? raw.voice.engine : '',
+        localVoiceId: typeof raw.voice?.localVoiceId === 'string' ? raw.voice.localVoiceId : '',
+        cloudVoice: typeof raw.voice?.cloudVoice === 'string' ? raw.voice.cloudVoice : '',
+        cloneId: typeof raw.voice?.cloneId === 'string' ? raw.voice.cloneId : '',
+      },
+      hasAvatar: await readable(join(characterDir(config, id), 'avatar.img')),
+      at: typeof raw.at === 'string' ? raw.at : '',
+    }
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Every stored character, newest last.
+ * @param config - validated plugin configuration.
+ * @returns the characters, sorted by creation time then id.
+ */
+async function listCharacters(config) {
+  let entries
+  try {
+    entries = await readdir(charactersDir(config), { withFileTypes: true })
+  } catch {
+    return []
+  }
+  const found = []
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    const character = await readCharacter(config, entry.name)
+    if (character !== undefined) found.push(character)
+  }
+  return found.sort((left, right) => (left.at === right.at ? left.id.localeCompare(right.id) : left.at.localeCompare(right.at)))
+}
+
+/**
+ * Create one character.
+ * @param ctx - plugin context, for the log line.
+ * @param config - validated plugin configuration.
+ * @param name - display name.
+ * @param personality - instructions for how the character behaves.
+ * @param voice - the voice selection to start from.
+ * @returns the created character.
+ */
+async function createCharacter(ctx, config, name, personality, voice) {
+  const id = `char-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+  const home = characterDir(config, id)
+  await mkdir(home, { recursive: true })
+  const label = name.trim() === '' ? '新角色' : name.trim().slice(0, 40)
+  const record = {
+    name: label,
+    personality: personality.slice(0, 4000),
+    voice: {
+      engine: ['local', 'clone', 'cloud'].includes(voice?.engine) ? voice.engine : '',
+      localVoiceId: voice?.localVoiceId ?? '',
+      cloudVoice: voice?.cloudVoice ?? '',
+      cloneId: voice?.cloneId ?? '',
+    },
+    at: new Date().toISOString(),
+  }
+  await writeFile(join(home, 'character.json'), JSON.stringify(record, null, 2), 'utf8')
+  ctx.logger.info(`voice-call created character "${label}" (${id})`)
+  return await readCharacter(config, id)
+}
+
+/**
+ * Update one character in place, leaving unnamed fields as they were.
+ * @param ctx - plugin context, for the log line.
+ * @param config - validated plugin configuration.
+ * @param id - character id.
+ * @param patch - fields to change.
+ * @returns the updated character.
+ */
+async function updateCharacter(ctx, config, id, patch) {
+  const current = await readCharacter(config, id)
+  if (current === undefined) throw new RequestError('Unknown character', 404)
+  const record = {
+    name: typeof patch.name === 'string' && patch.name.trim() !== '' ? patch.name.trim().slice(0, 40) : current.name,
+    personality: typeof patch.personality === 'string' ? patch.personality.slice(0, 4000) : current.personality,
+    voice: {
+      engine: ['local', 'clone', 'cloud'].includes(patch.voice?.engine) ? patch.voice.engine : current.voice.engine,
+      localVoiceId: typeof patch.voice?.localVoiceId === 'string' ? patch.voice.localVoiceId : current.voice.localVoiceId,
+      cloudVoice: typeof patch.voice?.cloudVoice === 'string' ? patch.voice.cloudVoice : current.voice.cloudVoice,
+      cloneId: typeof patch.voice?.cloneId === 'string' ? patch.voice.cloneId : current.voice.cloneId,
+    },
+    at: current.at,
+  }
+  await writeFile(join(characterDir(config, id), 'character.json'), JSON.stringify(record, null, 2), 'utf8')
+  ctx.logger.info(`voice-call updated character "${record.name}" (${id})`)
+  return await readCharacter(config, id)
+}
+
+/**
+ * Delete one character and everything it owns.
+ * @param ctx - plugin context, for the log line.
+ * @param config - validated plugin configuration.
+ * @param id - character id.
+ */
+async function deleteCharacter(ctx, config, id) {
+  await rm(characterDir(config, id), { recursive: true, force: true })
+  ctx.logger.info(`voice-call deleted character ${id}`)
+}
+
+/**
+ * Store one character's picture.
+ * @param config - validated plugin configuration.
+ * @param id - character id.
+ * @param bytes - the image.
+ * @param type - its declared media type.
+ */
+async function saveCharacterAvatar(config, id, bytes, type) {
+  const home = characterDir(config, id)
+  await mkdir(home, { recursive: true })
+  await writeFile(join(home, 'avatar.img'), bytes)
+  await writeFile(join(home, 'avatar.type'), type, 'utf8')
+}
+
+/**
+ * Read one character's picture.
+ * @param config - validated plugin configuration.
+ * @param id - character id.
+ * @returns the image and its type, or undefined when none is stored.
+ */
+async function readCharacterAvatar(config, id) {
+  return await readAvatarAt(join(characterDir(config, id), 'avatar.img'))
 }
 
 /**
@@ -337,7 +539,7 @@ async function waitForSettings(ctx, voice, signal) {
  * @param ctx - plugin context carrying the settings service.
  * @param voice - the selection to persist.
  */
-async function persistVoice(ctx, voice) {
+async function persistVoice(ctx, voice, character) {
   const settings = ctx.get('settings')
   const entry = ctx.fiber?.entry?.options?.id
   if (settings === undefined || entry === undefined) {
@@ -350,6 +552,9 @@ async function persistVoice(ctx, voice) {
     cloudVoice: voice.cloudVoice,
     cloneId: voice.cloneId,
     cloudFallback: voice.cloudFallback,
+    // Which character calls are placed as. Written with the voice because the
+    // two are one decision: activating a character changes the voice too.
+    ...character === undefined ? {} : { activeCharacter: character.id },
   })
 }
 
@@ -1044,6 +1249,27 @@ async function synthesizeCloud(ctx, text, work, config, voice) {
  * @returns the engine to use and the path it should load.
  */
 async function resolveVoice(ctx, config, voice) {
+  // An explicit engine wins outright. Without this, a character that chooses the
+  // cloud voice would still get a local one, because the local branch below
+  // treats "no local voice named" as "use the default local voice" -- which is
+  // the right default for the deployment and the wrong answer for a character
+  // that has already decided.
+  if (voice.engine === 'cloud') {
+    const cloud = CLOUD_VOICES.find((entry) => entry.id === (voice.cloudVoice || config.ttsVoice))
+    return { engine: 'cloud', path: '', label: cloud?.name ?? (voice.cloudVoice || config.ttsVoice) }
+  }
+  if (voice.engine === 'local' && voice.localVoiceId !== '') {
+    const voices = await listLocalVoices(config)
+    const hit = voices.find((entry) => entry.id === voice.localVoiceId || entry.path === voice.localVoiceId)
+    if (hit !== undefined) return { engine: 'piper', path: hit.path, label: hit.name }
+    ctx.logger.warn(`voice-call local voice "${voice.localVoiceId}" is missing; using the configured voice`)
+  }
+  if (voice.engine === 'clone' && voice.cloneId !== '') {
+    const clones = await listCloneVoices(config)
+    const hit = clones.find((entry) => entry.id === voice.cloneId)
+    if (hit !== undefined) return { engine: 'clone', path: hit.path, label: hit.name }
+    ctx.logger.warn(`voice-call clone voice "${voice.cloneId}" is missing; using the configured voice`)
+  }
   if (voice.cloneId !== '') {
     const clones = await listCloneVoices(config)
     const hit = clones.find((entry) => entry.id === voice.cloneId)
@@ -1347,6 +1573,56 @@ export function apply(ctx, config) {
     label: '',
   }
   /**
+   * The character a call is placed as, or null when none is selected.
+   *
+   * A character is a whole persona: it owns a voice, a picture, and the
+   * instructions that shape how the agent behaves. When one is active its voice
+   * wins over the settings above, because choosing a character is meant to
+   * choose all three at once; the settings remain the fallback for a deployment
+   * that uses no characters at all.
+   */
+  const character = { id: readConfig(config.activeCharacter, ''), record: null }
+  /**
+   * Load the active character's record, if one is selected.
+   *
+   * Re-read on every call rather than cached for the process: a character's
+   * voice or picture can be edited between calls, and a stale record would make
+   * the change appear to do nothing.
+   */
+  const refreshCharacter = async () => {
+    if (character.id === '') { character.record = null; return }
+    const record = await readCharacter(config, character.id)
+    if (record === undefined) {
+      // A deleted character must not leave the call pointing at nothing.
+      ctx.logger.warn(`voice-call character "${character.id}" is missing; using the voice settings`)
+      character.record = null
+      return
+    }
+    character.record = record
+  }
+  /**
+   * The voice a call should use, character first.
+   *
+   * @returns the effective selection, and whether a character supplied it.
+   */
+  const effectiveVoice = () => {
+    if (character.record === null) return { ...voice, fromCharacter: false }
+    const picked = character.record.voice
+    return {
+      ...voice,
+      // The character's engine decides which branch `resolveVoice` takes. An
+      // empty engine means the character named no voice, so the deployment's own
+      // settings apply and the local-preference default stands.
+      engine: picked.engine,
+      // An empty field on the character falls through to the setting, so a
+      // character that only names a clone still gets the configured cloud voice.
+      localVoiceId: picked.localVoiceId !== '' ? picked.localVoiceId : voice.localVoiceId,
+      cloudVoice: picked.cloudVoice !== '' ? picked.cloudVoice : voice.cloudVoice,
+      cloneId: picked.cloneId !== '' ? picked.cloneId : voice.cloneId,
+      fromCharacter: true,
+    }
+  }
+  /**
    * Apply the saved selection once, on the first request that needs it.
    *
    * Not done during `apply`: `settings.describe()` lists only ACTIVE fibers, and
@@ -1395,8 +1671,18 @@ export function apply(ctx, config) {
   ctx.effect(() => {
     const systemPrompt = ctx.get('systemPrompt')
     if (systemPrompt === undefined) return () => {}
-    return systemPrompt.variable('voice', () => voice.label === '' ? '你的声音' : voice.label)
-  }, 'voice-call voice prompt variable')
+    const disposers = [
+      systemPrompt.variable('voice', () => voice.label === '' ? '你的声音' : voice.label),
+      // The character's own fields. A deployment with no character resolves to
+      // a generic assistant rather than an empty name, so a persona that opens
+      // with "You are {{character}}" still reads as a sentence. The personality
+      // stays empty in that case, which drops to a blank line rather than
+      // inventing a character the deployment never chose.
+      systemPrompt.variable('character', () => character.record?.name || '一个语音助手'),
+      systemPrompt.variable('character_personality', () => character.record?.personality ?? ''),
+    ]
+    return () => { for (const dispose of disposers) dispose() }
+  }, 'voice-call prompt variables')
 
   /**
    * Resolve the selected voice's name once, for the prompt variable.
@@ -1411,7 +1697,8 @@ export function apply(ctx, config) {
   const ensureLabel = () => {
     labelReady ??= (async () => {
       await waitForSettings(ctx, voice, new AbortController().signal)
-      voice.label = (await resolveVoice(ctx, config, voice)).label
+      await refreshCharacter()
+      voice.label = (await resolveVoice(ctx, config, effectiveVoice())).label
     })().catch((error) => {
       ctx.logger.warn('voice-call could not resolve the voice name', error)
     })
@@ -1444,7 +1731,8 @@ export function apply(ctx, config) {
       if (!config.prewarm) return
       await ensureLabel()
       if (lifetime.signal.aborted) return
-      const chosen = await resolveVoice(ctx, config, voice)
+      await refreshCharacter()
+      const chosen = await resolveVoice(ctx, config, effectiveVoice())
       if (lifetime.signal.aborted) return
       const started = Date.now()
       try {
@@ -1483,7 +1771,8 @@ export function apply(ctx, config) {
           await ensureVoice()
           let audio
           let source = 'cloud'
-          const chosen = await resolveVoice(ctx, config, voice)
+          await refreshCharacter()
+          const chosen = await resolveVoice(ctx, config, effectiveVoice())
           voice.label = chosen.label
           if (chosen.engine === 'clone') {
             try {
@@ -1590,10 +1879,13 @@ export function apply(ctx, config) {
           if (typeof patch.cloudFallback === 'boolean') voice.cloudFallback = patch.cloudFallback
           // The prompt variable follows the selection, so the agent's name for
           // itself changes with the voice rather than at the next call.
-          voice.label = (await resolveVoice(ctx, config, voice)).label
+          await refreshCharacter()
+          voice.label = (await resolveVoice(ctx, config, effectiveVoice())).label
           // The selection outlives the process, so it is written to the profile
           // entry the same way the speech plugins persist their own choices.
-          await persistVoice(ctx, voice)
+          // The active character is passed too: omitting it would clear a
+          // selection this write was never asked to change.
+          await persistVoice(ctx, voice, character)
           json(res, 200, { settings: { rate: voice.rate, localVoiceId: voice.localVoiceId, cloudVoice: voice.cloudVoice, cloneId: voice.cloneId, cloudFallback: voice.cloudFallback } })
           return
         }
@@ -1609,6 +1901,118 @@ export function apply(ctx, config) {
           const { bytes, converted } = await toCanonicalWave(ctx, config, body, work)
           const created = await saveClone(ctx, config, bytes, name)
           json(res, 201, { voice: created, converted })
+          return
+        }
+        if (route === `${ROUTE_PREFIX}/characters` && req.method === 'GET') {
+          // Everything the characters page needs in one read: the roster, which
+          // one is active, and the voice options a character can choose from.
+          const [roster, locals, clones] = await Promise.all([
+            listCharacters(config), listLocalVoices(config), listCloneVoices(config),
+          ])
+          json(res, 200, {
+            characters: roster,
+            activeCharacter: character.id,
+            voices: [
+              ...locals.map((entry) => ({ id: entry.id, name: entry.name, engine: 'piper' })),
+              ...clones.map((entry) => ({ id: entry.id, name: entry.name, engine: 'clone' })),
+            ],
+            cloudVoices: CLOUD_VOICES,
+          })
+          return
+        }
+        if (route === `${ROUTE_PREFIX}/characters` && req.method === 'POST') {
+          const body = await readBody(req, config.maxTextBytes)
+          let patch
+          try {
+            patch = JSON.parse(body.toString('utf8'))
+          } catch {
+            throw new RequestError('A character must be a JSON object', 400)
+          }
+          if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+            throw new RequestError('A character must be a JSON object', 400)
+          }
+          const created = await createCharacter(ctx, config, String(patch.name ?? ''), String(patch.personality ?? ''), patch.voice)
+          json(res, 201, { character: created })
+          return
+        }
+        if (route.startsWith(`${ROUTE_PREFIX}/characters/`) && route.endsWith('/avatar')) {
+          const id = assertCharacterId(route.slice(`${ROUTE_PREFIX}/characters/`.length, -'/avatar'.length))
+          if (await readCharacter(config, id) === undefined) throw new RequestError('Unknown character', 404)
+          if (req.method === 'GET' || req.method === 'HEAD') {
+            const stored = await readCharacterAvatar(config, id)
+            if (stored === undefined) {
+              if (req.method === 'HEAD') { res.writeHead(200, { 'x-avatar': 'none' }); res.end(); return }
+              json(res, 200, { avatar: null }, { 'cache-control': 'no-store' })
+              return
+            }
+            if (req.method === 'HEAD') { res.writeHead(200, { 'x-avatar': stored.type }); res.end(); return }
+            res.writeHead(200, { 'content-type': stored.type, 'cache-control': 'no-store', 'content-length': stored.bytes.length })
+            res.end(stored.bytes)
+            return
+          }
+          if (req.method === 'POST') {
+            const type = String(req.headers['content-type'] ?? '').split(';')[0].trim()
+            if (!AVATAR_TYPES.has(type)) throw new RequestError(`Avatar must be one of: ${[...AVATAR_TYPES].join(', ')}`, 400)
+            const bytes = await readBody(req, config.maxAvatarBytes)
+            if (bytes.length === 0) throw new RequestError('No image was sent', 400)
+            await saveCharacterAvatar(config, id, bytes, type)
+            json(res, 201, { avatar: { type, bytes: bytes.length } })
+            return
+          }
+          if (req.method === 'DELETE') {
+            await rm(join(characterDir(config, id), 'avatar.img'), { force: true })
+            await rm(join(characterDir(config, id), 'avatar.type'), { force: true })
+            json(res, 200, { avatar: null })
+            return
+          }
+        }
+        if (route.startsWith(`${ROUTE_PREFIX}/characters/`) && req.method === 'PATCH') {
+          const id = assertCharacterId(route.slice(`${ROUTE_PREFIX}/characters/`.length))
+          const body = await readBody(req, config.maxTextBytes)
+          let patch
+          try {
+            patch = JSON.parse(body.toString('utf8'))
+          } catch {
+            throw new RequestError('A character must be a JSON object', 400)
+          }
+          const updated = await updateCharacter(ctx, config, id, patch ?? {})
+          // Editing the active character changes what the next call sounds like,
+          // so its cached record and voice name are refreshed at once.
+          if (character.id === id) { await refreshCharacter(); voice.label = (await resolveVoice(ctx, config, effectiveVoice())).label }
+          json(res, 200, { character: updated })
+          return
+        }
+        if (route.startsWith(`${ROUTE_PREFIX}/characters/`) && req.method === 'DELETE') {
+          const id = assertCharacterId(route.slice(`${ROUTE_PREFIX}/characters/`.length))
+          await deleteCharacter(ctx, config, id)
+          // Deleting the active character clears the selection, so a call is not
+          // left pointing at a record that no longer exists.
+          if (character.id === id) {
+            character.id = ''
+            character.record = null
+            voice.label = (await resolveVoice(ctx, config, voice)).label
+            await persistVoice(ctx, voice, character)
+          }
+          json(res, 200, { deleted: id })
+          return
+        }
+        if (route === `${ROUTE_PREFIX}/active-character` && req.method === 'POST') {
+          const body = await readBody(req, config.maxTextBytes)
+          let patch
+          try {
+            patch = JSON.parse(body.toString('utf8'))
+          } catch {
+            throw new RequestError('Expected a JSON object', 400)
+          }
+          const wanted = String(patch?.id ?? '')
+          if (wanted !== '' && await readCharacter(config, wanted) === undefined) {
+            throw new RequestError('Unknown character', 404)
+          }
+          character.id = wanted
+          await refreshCharacter()
+          voice.label = (await resolveVoice(ctx, config, effectiveVoice())).label
+          await persistVoice(ctx, voice, character)
+          json(res, 200, { activeCharacter: character.id, voice: voice.label })
           return
         }
         if (route === `${ROUTE_PREFIX}/avatar` && (req.method === 'GET' || req.method === 'HEAD')) {

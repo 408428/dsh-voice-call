@@ -257,18 +257,18 @@ What moves:
 | **Blink** | A timer at an irregular 2-6 s, which reads as alive without a schedule anyone can predict. |
 | **Breathing and sway** | A slow sine, which also makes the relief readable: seen head-on, a 0.22-unit bump changes almost no pixels. |
 
-Mouth and eye positions are **guessed**, and a guess is wrong often enough that
-the page lets you correct it: drag the two marks onto the mouth and the eyes and
-press Save. The marks are stored against the picture's own bytes, so replacing the
-picture discards a calibration that described the old one.
+Mouth and eye positions are found **automatically**, by a face detector trained
+on **drawn** faces (YOLOv8, 42 MB, beside the depth model). That distinction is
+the whole reason this works: a detector trained on photographs scores 0.18 on a
+cel against a 0.6 threshold, while this one finds the face at 0.76 and puts the
+eyes and mouth on the features. The eyes and mouth are then placed by proportions
+inside that box -- measured against a real cel, at about 40% and 71% down it.
 
-The guess itself uses the near part of the depth map, on the reasoning that a
-portrait is a near object against a far background. That holds for a photograph
-and fails for a drawing: measured on a cel, the mouth landed on the eyes, because
-the hair of a bob cut is nearer the camera than the face. A face detector was
-tried for this and rejected -- YuNet scores 0.91 on a photograph and 0.18 on a
-drawn face, against a 0.6 threshold -- so the marks are what makes a drawing
-work, not a better guess.
+If it ever lands wrong, the page still lets you correct it: drag the two marks
+onto the mouth and the eyes and press Save. The marks are stored against the
+picture's own bytes, so replacing the picture discards a calibration that
+described the old one. Precedence is **marks, then the detector, then a depth
+guess**, which is what runs when no face is found at all.
 
 Measured here: the model loads in 0.2 s, a mesh takes 0.3-0.6 s, and the payload
 is about 540 KB at the default grid (20 480 vertices, 40 386 triangles). The mesh

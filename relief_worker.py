@@ -29,6 +29,12 @@ import sys
 # The depth model and its preprocessor constants. Kept here rather than fetched,
 # because a call must not depend on a network round trip.
 MODEL_NAME = "depth-anything-v2-small.onnx"
+# A YOLO detector trained on DRAWN faces, which is what makes automatic
+# placement work for an illustration. A photograph detector does not fire on
+# ink: measured here, YuNet scored 0.18 on a cel against a 0.6 threshold.
+FACE_MODEL_NAME = "anime-face-v1.1s.onnx"
+FACE_SIZE = 640
+FACE_CONF = 0.25
 MEAN = (0.485, 0.456, 0.406)
 STD = (0.229, 0.224, 0.225)
 # The model expects both sides to be a multiple of this.
@@ -87,6 +93,111 @@ def estimate_depth(session, image):
         # Returning a flat map is honest; inventing one would be a fake face.
         return np.zeros_like(raw, dtype=np.float32)
     return ((raw - raw.min()) / span).astype(np.float32)
+
+
+FACE_MODEL_NAME = "anime-face-v1.1s.onnx"
+FACE_SIZE = 640
+FACE_CONF = 0.25
+
+
+def load_face_session(path):
+    """Open the anime face detector, or return None when it is not installed."""
+    import onnxruntime as ort
+
+    if not os.path.exists(path):
+        log(f"face model not found at {path}; falling back to the depth guess")
+        return None
+    try:
+        return ort.InferenceSession(path, ort.SessionOptions(), providers=["CPUExecutionProvider"])
+    except Exception as error:
+        log(f"face model failed to load: {error}")
+        return None
+
+
+def detect_face_box(session, image):
+    """Find the drawn face, as a normalized box.
+
+    A YOLOv8 detector trained on DRAWN faces, which is what makes automatic
+    placement work for an illustration. A photograph detector does not fire on
+    ink: measured here, YuNet scored 0.18 on a cel against a 0.6 threshold.
+
+    @param session - the face detector session.
+    @param image - a PIL image in RGB.
+    @returns the box as [x, y, w, h] in 0..1, or None.
+    """
+    import numpy as np
+    from PIL import Image
+
+    if session is None:
+        return None
+    width, height = image.size
+    scale = min(FACE_SIZE / width, FACE_SIZE / height)
+    resized_w = max(1, int(round(width * scale)))
+    resized_h = max(1, int(round(height * scale)))
+    # Letterbox with grey, the padding Ultralytics trains with.
+    canvas = Image.new("RGB", (FACE_SIZE, FACE_SIZE), (114, 114, 114))
+    offset_x = (FACE_SIZE - resized_w) // 2
+    offset_y = (FACE_SIZE - resized_h) // 2
+    canvas.paste(image.resize((resized_w, resized_h), Image.BILINEAR), (offset_x, offset_y))
+    pixels = np.asarray(canvas, dtype=np.float32) / 255.0
+    tensor = pixels.transpose(2, 0, 1)[None]
+    output = session.run(None, {session.get_inputs()[0].name: tensor})[0]
+    # [1, 4 + classes, anchors] -> anchors x (4 + classes).
+    predictions = output[0].T
+    scores = predictions[:, 4:].max(axis=1)
+    keep = scores >= FACE_CONF
+    if not keep.any():
+        return None
+    predictions = predictions[keep]
+    scores = scores[keep]
+    cx, cy, bw, bh = predictions[:, 0], predictions[:, 1], predictions[:, 2], predictions[:, 3]
+    x1, y1 = cx - bw / 2, cy - bh / 2
+    x2, y2 = cx + bw / 2, cy + bh / 2
+    order = scores.argsort()[::-1]
+    kept = []
+    for i in order:
+        ok = True
+        for j in kept:
+            ix = max(0.0, min(x2[i], x2[j]) - max(x1[i], x1[j]))
+            iy = max(0.0, min(y2[i], y2[j]) - max(y1[i], y1[j]))
+            inter = ix * iy
+            union = (x2[i]-x1[i])*(y2[i]-y1[i]) + (x2[j]-x1[j])*(y2[j]-y1[j]) - inter
+            if union > 0 and inter / union > 0.45:
+                ok = False
+                break
+        if ok:
+            kept.append(i)
+    if not kept:
+        return None
+    best = kept[0]
+    # Back out of the letterbox.
+    bx = (x1[best] - offset_x) / scale / width
+    by = (y1[best] - offset_y) / scale / height
+    bwid = (x2[best] - x1[best]) / scale / width
+    bhei = (y2[best] - y1[best]) / scale / height
+    if bwid <= 0.02 or bhei <= 0.02:
+        return None
+    return [float(bx), float(by), float(bwid), float(bhei)]
+
+
+def features_in_box(box):
+    """Place the eyes and the mouth inside a face box.
+
+    Proportions rather than a second model, because they were measured against a
+    real cel: with a correct face box the eyes sit about 40% down it and the
+    mouth about 71%, and both span most of its width.
+
+    @param box - the face box, normalized.
+    @returns the mouth and eye boxes, with the face box itself.
+    """
+    bx, by, bw, bh = box
+    return {
+        "face": [bx, by, bw, bh],
+        "leftEye": [bx + bw * 0.119, by + bh * 0.347, bw * 0.716, bh * 0.11],
+        "rightEye": [bx + bw * 0.119, by + bh * 0.347, bw * 0.716, bh * 0.11],
+        "mouth": [bx + bw * 0.313, by + bh * 0.657, bw * 0.21, bh * 0.10],
+    }
+
 
 
 def find_face_from_depth(depth):
@@ -239,6 +350,10 @@ def main():
     except Exception as error:
         emit({"id": None, "error": f"depth model failed to load: {error}"})
         return 1
+    # The face detector sits beside the depth model and is optional: without it
+    # placement falls back to the depth guess, which the marks can still correct.
+    face_path = os.path.join(os.path.dirname(model_path), FACE_MODEL_NAME)
+    face_session = load_face_session(face_path)
     from PIL import Image
 
     emit({"id": None, "ready": True})
@@ -275,7 +390,11 @@ def main():
                 # Depth first: it always answers, needs no second model, and a
                 # face detector is only a refinement when one happens to be
                 # installed.
-                "face": find_face_from_depth(depth),
+                # Detector first: it is trained on drawings, so it works where
+                # the depth guess does not. The guess stands in when there is no
+                # model or no face, and the marks override both.
+                "face": (lambda box: features_in_box(box) if box else find_face_from_depth(depth))(
+                    detect_face_box(face_session, image)),
             })
         except Exception as error:
             emit({"id": request_id, "error": f"{type(error).__name__}: {error}"})

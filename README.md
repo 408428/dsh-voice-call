@@ -252,10 +252,18 @@ What moves:
 | **Blink** | A timer at an irregular 2-6 s, which reads as alive without a schedule anyone can predict. |
 | **Breathing and sway** | A slow sine, which also makes the relief readable: seen head-on, a 0.22-unit bump changes almost no pixels. |
 
-The mouth and eye positions come from the **depth map**, not from a face
-detector: a portrait is a near object against a far background, so the nearest
-blob is the subject. That costs nothing extra, needs no second model, and still
-answers sensibly for a picture that is not a face.
+Mouth and eye positions are **guessed**, and a guess is wrong often enough that
+the page lets you correct it: drag the two marks onto the mouth and the eyes and
+press Save. The marks are stored against the picture's own bytes, so replacing the
+picture discards a calibration that described the old one.
+
+The guess itself uses the near part of the depth map, on the reasoning that a
+portrait is a near object against a far background. That holds for a photograph
+and fails for a drawing: measured on a cel, the mouth landed on the eyes, because
+the hair of a bob cut is nearer the camera than the face. A face detector was
+tried for this and rejected -- YuNet scores 0.91 on a photograph and 0.18 on a
+drawn face, against a 0.6 threshold -- so the marks are what makes a drawing
+work, not a better guess.
 
 Measured here: the model loads in 0.2 s, a mesh takes 0.3-0.6 s, and the payload
 is about 540 KB at the default grid (20 480 vertices, 40 386 triangles). The mesh

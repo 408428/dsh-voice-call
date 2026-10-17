@@ -89,6 +89,20 @@
           'settings.avatarWorking': 'Uploading…',
           'settings.avatarOk': 'The call picture is set.',
           'settings.avatarCleared': 'The call picture was removed.',
+          'settings.calibrate': 'Mouth and eyes',
+          'settings.calibrateHint': 'Drag each mark onto the mouth and the eyes. The figure opens its mouth and blinks there, so a picture of a drawing usually needs this.',
+          'settings.calibrateEye': 'Eye',
+          'settings.calibrateMouth': 'Mouth',
+          'settings.calibrateSave': 'Save marks',
+          'settings.calibrateSaving': 'Saving...',
+          'settings.calibrateReset': 'Use automatic',
+          'settings.calibrateSaved': 'Marks saved. The figure uses them from the next call.',
+          'settings.calibrateReset_done': 'Automatic placement is back.',
+          'settings.calibrateFailed': 'Could not save the marks: {message}',
+          'settings.calibrateSourceManual': 'Using the marks you set.',
+          'settings.calibrateSourceAuto': 'Using automatic placement, which can be wrong for a drawing.',
+          'settings.calibrateNoPicture': 'Add a picture first, then mark the mouth and eyes here.',
+          'settings.calibrateNoRelief': 'The 3D figure is not available, so there is nothing to mark.',
           'settings.avatarFailed': 'Could not set the picture: {message}',
           'characters.nav': 'Characters',
           'characters.intro': 'A character is a name, a personality, a voice, a picture, and a pace. Choose one and every call is placed as that character.',
@@ -202,6 +216,20 @@
           'settings.avatarWorking': '上传中…',
           'settings.avatarOk': '通话头像已设置。',
           'settings.avatarCleared': '通话头像已移除。',
+          'settings.calibrate': '嘴和眼睛位置',
+          'settings.calibrateHint': '把两个标记拖到嘴和眼睛上。形象会在这里张嘴和眨眼，所以动漫/插画一般需要手动标一下。',
+          'settings.calibrateEye': '眼睛',
+          'settings.calibrateMouth': '嘴',
+          'settings.calibrateSave': '保存标记',
+          'settings.calibrateSaving': '保存中...',
+          'settings.calibrateReset': '改回自动',
+          'settings.calibrateSaved': '标记已保存，下次通话生效。',
+          'settings.calibrateReset_done': '已改回自动定位。',
+          'settings.calibrateFailed': '保存标记失败：{message}',
+          'settings.calibrateSourceManual': '正在使用你设置的位置。',
+          'settings.calibrateSourceAuto': '正在使用自动定位 —— 对插画可能不准。',
+          'settings.calibrateNoPicture': '请先添加图片，再来这里标记嘴和眼睛。',
+          'settings.calibrateNoRelief': '3D 形象不可用，没有可标记的内容。',
           'settings.avatarFailed': '设置头像失败：{message}',
           'characters.nav': '角色',
           'characters.intro': '一个角色 = 名字 + 性格 + 声线 + 头像 + 语速。选中一个角色后，通话就以这个角色的身份进行。',
@@ -1290,7 +1318,8 @@
           'uniform mat4 uProject;',
           'uniform float uOpen;',      // mouth opening, 0..1
           'uniform vec4 uMouth;',      // mouth box in mesh UV, xy = centre, zw = half size
-          'uniform vec2 uMouthMove;',  // extra push for the mouth, xy
+          'uniform vec4 uBounds;',     // mesh extent: minX, minY, maxX, maxY
+          'uniform float uMouthSize;', // how far the jaw drops, scene units
           'uniform float uBlink;',     // eyelid closing, 0..1
           'uniform vec4 uEyeL;',
           'uniform vec4 uEyeR;',
@@ -1303,11 +1332,17 @@
           '}',
           'void main() {',
           '  vec3 p = aPosition;',
-          '  vec2 uv = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);',
-          // The mouth opens by pushing its vertices forward and apart slightly.
+          // UV derived from the geometry's own extent, not from an assumed
+          // -1..1: a picture is not square, so x only spans its aspect ratio.
+          '  vec2 uv = vec2((p.x - uBounds.x) / max(uBounds.z - uBounds.x, 1e-5),',
+          '                 (uBounds.w - p.y) / max(uBounds.w - uBounds.y, 1e-5));',
+          // The mouth opens ACROSS the picture, not toward the camera. A jaw
+          // drops: the part below the mouth's centre goes down, the part above
+          // stays, so the region stretches rather than sliding as a block. A
+          // purely forward push was invisible from the camera the call uses.
           '  float mouth = boxWeight(uv, uMouth, 0.055);',
-          '  p.z += mouth * uOpen * 0.10 + mouth * uMouthMove.x;',
-          '  p.y += mouth * uOpen * uMouthMove.y;',
+          '  float jaw = clamp((uv.y - uMouth.y) / max(uMouth.w, 1e-4) * 0.5 + 0.5, 0.0, 1.0);',
+          '  p.y -= mouth * jaw * uOpen * uMouthSize;',
           // The eyes squash vertically as the lids close.
           '  float eyeL = boxWeight(uv, uEyeL, 0.030);',
           '  float eyeR = boxWeight(uv, uEyeR, 0.030);',
@@ -1360,7 +1395,7 @@
           color: gl.getAttribLocation(program, 'aColor'),
         }
         const uniform = {}
-        for (const name of ['uView', 'uProject', 'uOpen', 'uMouth', 'uMouthMove', 'uBlink', 'uEyeL', 'uEyeR', 'uFade']) {
+        for (const name of ['uView', 'uProject', 'uOpen', 'uMouth', 'uBounds', 'uMouthSize', 'uBlink', 'uEyeL', 'uEyeR', 'uFade']) {
           uniform[name] = gl.getUniformLocation(program, name)
         }
 
@@ -1368,6 +1403,10 @@
         let indexCount = 0
         let grid = [1, 1]
         let face = null
+        // The geometry's own extent, measured from the vertices. The UV mapping
+        // needs it: a picture is not square, so x spans only its aspect ratio,
+        // and assuming -1..1 stretched every mark toward the middle.
+        let bounds = [-1, -1, 1, 1]
 
         /** A 4x4 identity matrix, as a flat array. */
         const identity = () => new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
@@ -1423,6 +1462,16 @@
             grid = mesh.grid
             face = mesh.face
             indexCount = mesh.index.length
+            // Measure x and y only: z is the relief, not the picture plane.
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+            for (let i = 0; i < mesh.position.length; i += 3) {
+              const x = mesh.position[i], y = mesh.position[i + 1]
+              if (x < minX) minX = x
+              if (x > maxX) maxX = x
+              if (y < minY) minY = y
+              if (y > maxY) maxY = y
+            }
+            bounds = [minX, minY, maxX, maxY]
             gl.bindBuffer(gl.ARRAY_BUFFER, buffers.position)
             gl.bufferData(gl.ARRAY_BUFFER, mesh.position, gl.STATIC_DRAW)
             gl.bindBuffer(gl.ARRAY_BUFFER, buffers.color)
@@ -1472,10 +1521,14 @@
             // The shader works in mesh UV, where y grows downward, so a box given
             // as [x, y, w, h] from the top becomes a centre plus half size.
             const toUv = (b) => [b[0] + b[2] / 2, b[1] + b[3] / 2, b[2] / 2, b[3] / 2]
+            gl.uniform4fv(uniform.uBounds, bounds)
+            // The jaw drops by about the height of the mouth box, in scene
+            // units, so the motion scales with the picture.
+            gl.uniform1f(uniform.uMouthSize, Math.max(0.01, mouth[3] * (bounds[3] - bounds[1])))
             gl.uniform4fv(uniform.uMouth, toUv(mouth))
             gl.uniform4fv(uniform.uEyeL, toUv(eyeL))
             gl.uniform4fv(uniform.uEyeR, toUv(eyeR))
-            gl.uniform2fv(uniform.uMouthMove, [0, options.mouthPush ?? 0])
+            // The old forward-push uniform is gone; the jaw now moves in-plane.
 
             gl.bindBuffer(gl.ARRAY_BUFFER, buffers.position)
             gl.enableVertexAttribArray(attr.position)
@@ -2114,7 +2167,11 @@
                     disabled: state.saving,
                     onClick: () => { void settings.clearAvatar() },
                   }, t('settings.avatarClear'))
-                : null)),
+                : null),
+            // Marking the face belongs with the picture, because it describes
+            // where the features are in that picture.
+            h('span', { className: 'dvc-set-label' }, t('settings.calibrate')),
+            h(FaceCalibration, { settings, t })),
           // Cloning.
           h('section', { className: 'dvc-set-block' },
             h('span', { className: 'dvc-set-label' }, t('settings.clone')),
@@ -2142,6 +2199,156 @@
           state.notice === null ? null : h('p', {
             className: ['settings.saved', 'settings.cloneOk', 'settings.cloneConverted', 'settings.voiceRemoved', 'settings.avatarOk', 'settings.avatarCleared'].includes(state.notice.key) ? 'dvc-set-ok' : 'dvc-set-error',
           }, t(state.notice.key, state.notice.params)))
+      }
+
+
+      /**
+       * Mark where a picture's mouth and eyes are.
+       *
+       * The automatic guess is right for a photograph and wrong for a drawing --
+       * measured on a cel, the mouth landed on the eyes -- because a detector
+       * trained on photographs does not fire on ink, and the depth cue follows
+       * the hair of a bob cut rather than the face. Two draggable marks are the
+       * one thing that works for both, and they take a few seconds once.
+       *
+       * The marks are boxes, not points, because the animation deforms what they
+       * cover: the mouth opens across its width and the lids close across the
+       * eye.
+       *
+       * @param props - the picture source, the current boxes, and a save handler.
+       * @returns The calibration editor.
+       */
+      function FaceCalibration({ settings, t }) {
+        const state = useSyncExternalStore(settings.store.subscribe, settings.store.getSnapshot, settings.store.getSnapshot)
+        // Loaded once per open: the boxes come from the Host, which owns the
+        // calibration, and the picture is the one a call would show.
+        const [boxes, setBoxes] = useState(null)
+        const [source, setSource] = useState('auto')
+        const [drag, setDrag] = useState(null)
+        const [saving, setSaving] = useState(false)
+        const [notice, setNotice] = useState(null)
+        const areaRef = useRef(null)
+        const load = useCallback(async () => {
+          try {
+            const response = await fetch('/.dsh-voice-call/relief')
+            if (!response.ok) return
+            const body = await response.json()
+            if (body.relief === null) { setBoxes(null); return }
+            setBoxes(body.relief.face ?? null)
+            setSource(body.relief.faceSource ?? 'auto')
+          } catch { /* no relief means nothing to calibrate */ }
+        }, [])
+        useEffect(() => { void load() }, [load, state.avatarRev, state.avatarSet])
+
+        // Pointer moves are tracked on the window so a drag that leaves the
+        // picture still follows the pointer instead of stopping at its edge.
+        useEffect(() => {
+          if (drag === null) return undefined
+          const move = (event) => {
+            const area = areaRef.current
+            if (area === null) return
+            const rect = area.getBoundingClientRect()
+            const x = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width))
+            const y = Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height))
+            setBoxes((current) => {
+              if (current === null) return current
+              const box = current[drag]
+              if (box === undefined) return current
+              // The pointer marks the CENTRE of the box; the box keeps its size.
+              return { ...current, [drag]: [x - box[2] / 2, y - box[3] / 2, box[2], box[3]] }
+            })
+          }
+          const up = () => { setDrag(null) }
+          window.addEventListener('pointermove', move)
+          window.addEventListener('pointerup', up)
+          window.addEventListener('pointercancel', up)
+          return () => {
+            window.removeEventListener('pointermove', move)
+            window.removeEventListener('pointerup', up)
+            window.removeEventListener('pointercancel', up)
+          }
+        }, [drag])
+
+        const save = async () => {
+          if (boxes === null) return
+          setSaving(true)
+          setNotice(null)
+          try {
+            const response = await fetch('/.dsh-voice-call/calibration', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify(boxes),
+            })
+            if (!response.ok) {
+              const body = await response.json().catch(() => null)
+              throw new Error(body?.error ?? `HTTP ${String(response.status)}`)
+            }
+            setSource('calibrated')
+            setNotice(t('settings.calibrateSaved'))
+          } catch (error) {
+            setNotice(t('settings.calibrateFailed', { message: String(error?.message ?? error) }))
+          } finally {
+            setSaving(false)
+          }
+        }
+        const reset = async () => {
+          setSaving(true)
+          setNotice(null)
+          try {
+            await fetch('/.dsh-voice-call/calibration', { method: 'DELETE' })
+            await load()
+            setNotice(t('settings.calibrateReset'))
+          } catch (error) {
+            setNotice(t('settings.calibrateFailed', { message: String(error?.message ?? error) }))
+          } finally {
+            setSaving(false)
+          }
+        }
+
+        if (!state.avatarSet) return h('p', { className: 'dvc-set-note' }, t('settings.calibrateNoPicture'))
+        if (boxes === null) return h('p', { className: 'dvc-set-note' }, t('settings.calibrateNoRelief'))
+
+        // The marks are drawn as percentages over the picture, so they follow it
+        // at any size without measuring again.
+        const mark = (key, label, color) => {
+          const box = boxes[key]
+          if (box === undefined) return null
+          return h('span', {
+            key,
+            className: 'dvc-mark',
+            style: {
+              left: `${String(box[0] * 100)}%`,
+              top: `${String(box[1] * 100)}%`,
+              width: `${String(box[2] * 100)}%`,
+              height: `${String(box[3] * 100)}%`,
+              borderColor: color,
+            },
+            title: label,
+            onPointerDown: (event) => { event.preventDefault(); setDrag(key) },
+          }, h('span', { className: 'dvc-mark-label', style: { background: color } }, label))
+        }
+        return h('div', { className: 'dvc-calibrate' },
+          h('div', { className: 'dvc-calibrate-stage' },
+            h('div', { className: 'dvc-calibrate-area', ref: areaRef },
+              h('img', { className: 'dvc-calibrate-img', src: `/.dsh-voice-call/call-avatar?rev=${String(state.avatarRev)}`, alt: '' }),
+              mark('leftEye', t('settings.calibrateEye'), 'var(--dsw-alias-brand-primary)'),
+              mark('rightEye', t('settings.calibrateEye'), 'var(--dsw-alias-brand-primary)'),
+              mark('mouth', t('settings.calibrateMouth'), 'var(--dsw-alias-state-error-primary)'))),
+          h('p', { className: 'dvc-set-note' }, t('settings.calibrateHint')),
+          h('p', { className: 'dvc-set-note' },
+            source === 'calibrated' ? t('settings.calibrateSourceManual') : t('settings.calibrateSourceAuto')),
+          h('div', { className: 'dvc-set-row' },
+            h('button', {
+              type: 'button', className: 'dvc-set-primary', disabled: saving,
+              onClick: () => { void save() },
+            }, saving ? t('settings.calibrateSaving') : t('settings.calibrateSave')),
+            source === 'calibrated'
+              ? h('button', {
+                  type: 'button', className: 'dvc-set-quiet', disabled: saving,
+                  onClick: () => { void reset() },
+                }, t('settings.calibrateReset'))
+              : null),
+          notice === null ? null : h('p', { className: 'dvc-set-ok' }, notice))
       }
 
       /**
@@ -2396,6 +2603,13 @@
 .dvc-avatar{display:grid;place-items:center;width:88px;height:88px;border-radius:999px;color:var(--dsw-alias-label-primary-inverted);font-size:34px;font-weight:600;box-shadow:var(--dsw-shadow-lv2)}
 .dvc-avatar-img{object-fit:cover;background:var(--dsw-alias-bg-base)}
 .dvc-avatar-3d{display:block;background:transparent}
+.dvc-calibrate{display:flex;flex-direction:column;gap:10px}
+.dvc-calibrate-stage{display:flex;justify-content:center}
+.dvc-calibrate-area{position:relative;width:100%;max-width:260px;line-height:0;touch-action:none}
+.dvc-calibrate-img{width:100%;height:auto;border-radius:10px;display:block}
+.dvc-mark{position:absolute;border:2px solid;border-radius:6px;cursor:grab;box-sizing:border-box;min-width:10px;min-height:8px}
+.dvc-mark:active{cursor:grabbing}
+.dvc-mark-label{position:absolute;left:0;top:-9px;padding:1px 5px;border-radius:5px;color:#fff;font-size:10px;line-height:1.5;white-space:nowrap;opacity:.9}
 .dvc-ring{position:absolute;inset:0;border-radius:999px;border:2px solid var(--dsw-alias-brand-primary);opacity:0;transform:scale(.86)}
 .dvc-ring[data-active]{animation:dvc-pulse 1.6s ease-out infinite}
 .dvc-ring-late[data-active]{animation-delay:.8s}

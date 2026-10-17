@@ -538,6 +538,60 @@ async function deleteCharacter(ctx, config, id) {
 }
 
 /**
+ * Where one picture's face calibration is stored.
+ *
+ * Keyed by the picture's own bytes, not by the character or the deployment:
+ * replacing the picture must discard a calibration that described the old one,
+ * and the same picture used twice keeps its marks.
+ *
+ * @param config - validated plugin configuration.
+ * @param key - hash of the picture's bytes.
+ */
+function calibrationPath(config, key) {
+  return join(localPaths(config).cloneDir, '..', 'calibration', `${key}.json`)
+}
+
+/**
+ * Read the face calibration for one picture, if any.
+ *
+ * @param config - validated plugin configuration.
+ * @param key - hash of the picture's bytes.
+ * @returns the boxes, or null when the picture was never calibrated.
+ */
+async function readCalibration(config, key) {
+  try {
+    const raw = JSON.parse(await readFile(calibrationPath(config, key), 'utf8'))
+    // Only accept a shape the renderer can use, so a hand-edited file cannot
+    // put the animation somewhere nonsensical.
+    const box = (value) => Array.isArray(value) && value.length === 4 && value.every((n) => typeof n === 'number' && n >= -0.5 && n <= 1.5)
+    if (!box(raw.mouth) || !box(raw.leftEye) || !box(raw.rightEye)) return null
+    return {
+      mouth: raw.mouth,
+      leftEye: raw.leftEye,
+      rightEye: raw.rightEye,
+      face: box(raw.face) ? raw.face : null,
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Store the face calibration for one picture.
+ *
+ * @param ctx - plugin context, for the log line.
+ * @param config - validated plugin configuration.
+ * @param key - hash of the picture's bytes.
+ * @param boxes - the mouth and eye boxes, normalized to the picture.
+ */
+async function saveCalibration(ctx, config, key, boxes) {
+  const path = calibrationPath(config, key)
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(path, JSON.stringify(boxes, null, 2), 'utf8')
+  ctx.logger.info(`voice-call saved a face calibration for picture ${key}`)
+}
+
+/**
  * Store one character's picture.
  * @param config - validated plugin configuration.
  * @param id - character id.
@@ -2179,6 +2233,7 @@ export function apply(ctx, config) {
           // the mesh and nothing else does. A call re-reads this on every phase
           // change, and rebuilding 500 KB of geometry each time would be waste.
           const key = createHash('sha256').update(stored.bytes).digest('hex').slice(0, 24)
+          const calibration = await readCalibration(config, key)
           if (reliefCache.key !== key) {
             const image = join(work, 'relief-input.img')
             await writeFile(image, stored.bytes)
@@ -2194,11 +2249,65 @@ export function apply(ctx, config) {
               position: reply.position,
               color: reply.color,
               index: reply.index,
-              face: reply.face ?? null,
+              // A calibration beats the automatic guess: on a drawing the
+              // guess is often wrong, and this is how the user corrects it.
+              face: calibration ?? reply.face ?? null,
+              faceSource: calibration === null ? 'auto' : 'calibrated',
             }
             ctx.logger.info(`voice-call built a relief mesh (${reply.grid.join('x')}) in ${String(Date.now() - started)} ms`)
           }
-          json(res, 200, { relief: reliefCache.mesh, key }, { 'cache-control': 'no-store' })
+          json(res, 200, {
+            relief: {
+              ...reliefCache.mesh,
+              // Re-read rather than cached with the mesh: a calibration saved
+              // after the mesh was built must apply to the next read.
+              face: calibration ?? reliefCache.mesh.face,
+              faceSource: calibration === null ? 'auto' : 'calibrated',
+            },
+            key,
+          }, { 'cache-control': 'no-store' })
+          return
+        }
+        if (route === `${ROUTE_PREFIX}/calibration` && req.method === 'POST') {
+          // Save the boxes the user marked for the current picture.
+          const body = await readBody(req, config.maxTextBytes)
+          let boxes
+          try {
+            boxes = JSON.parse(body.toString('utf8'))
+          } catch {
+            throw new RequestError('A calibration must be a JSON object', 400)
+          }
+          const box = (value) => Array.isArray(value) && value.length === 4
+            && value.every((n) => typeof n === 'number' && Number.isFinite(n) && n >= -0.5 && n <= 1.5)
+          if (boxes === null || typeof boxes !== 'object'
+            || !box(boxes.mouth) || !box(boxes.leftEye) || !box(boxes.rightEye)) {
+            throw new RequestError('A calibration needs mouth, leftEye, and rightEye boxes', 400)
+          }
+          await ensureVoice()
+          await refreshCharacter()
+          const fromCharacter = character.record === null ? undefined : await readCharacterAvatar(config, character.id)
+          const stored = fromCharacter ?? await readAvatar(config)
+          if (stored === undefined) throw new RequestError('There is no picture to calibrate', 400)
+          const key = createHash('sha256').update(stored.bytes).digest('hex').slice(0, 24)
+          await saveCalibration(ctx, config, key, {
+            face: box(boxes.face) ? boxes.face : null,
+            mouth: boxes.mouth,
+            leftEye: boxes.leftEye,
+            rightEye: boxes.rightEye,
+          })
+          json(res, 200, { calibrated: key })
+          return
+        }
+        if (route === `${ROUTE_PREFIX}/calibration` && req.method === 'DELETE') {
+          // Forget the marks, so the automatic guess applies again.
+          await ensureVoice()
+          await refreshCharacter()
+          const fromCharacter = character.record === null ? undefined : await readCharacterAvatar(config, character.id)
+          const stored = fromCharacter ?? await readAvatar(config)
+          if (stored === undefined) throw new RequestError('There is no picture to calibrate', 400)
+          const key = createHash('sha256').update(stored.bytes).digest('hex').slice(0, 24)
+          await rm(calibrationPath(config, key), { force: true })
+          json(res, 200, { cleared: key })
           return
         }
         if (route === `${ROUTE_PREFIX}/call-avatar` && (req.method === 'GET' || req.method === 'HEAD')) {

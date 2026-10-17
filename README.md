@@ -230,6 +230,43 @@ sentence.
 The **cloud-fallback switch stays deployment-wide**. It describes whether audio
 may leave this machine at all, which is not a property of who is speaking.
 
+## The 3D figure
+
+An uploaded picture can become a **relief** that the call animates, instead of a
+flat image. A depth model estimates how near each pixel is, the pixels are pushed
+along that axis, and the result is a mesh whose vertices carry their own colour,
+so the surface is the photograph itself.
+
+That choice is deliberate and it has a limit worth stating plainly: this is a
+relief, not a round reconstruction. Turning it fully sideways shows the back of a
+plane, so the call keeps the camera within a modest angle. In exchange the figure
+looks like the person in the picture -- which a general single-image 3D
+reconstruction does not reliably do -- and it needs no 1.6 GB checkpoint, no
+compilation, and no network.
+
+What moves:
+
+| Motion | Driven by |
+| --- | --- |
+| **Mouth** | The reply's own loudness, the same level the meter shows, smoothed so it opens and closes like a mouth rather than flickering. |
+| **Blink** | A timer at an irregular 2-6 s, which reads as alive without a schedule anyone can predict. |
+| **Breathing and sway** | A slow sine, which also makes the relief readable: seen head-on, a 0.22-unit bump changes almost no pixels. |
+
+The mouth and eye positions come from the **depth map**, not from a face
+detector: a portrait is a near object against a far background, so the nearest
+blob is the subject. That costs nothing extra, needs no second model, and still
+answers sensibly for a picture that is not a face.
+
+Measured here: the model loads in 0.2 s, a mesh takes 0.3-0.6 s, and the payload
+is about 540 KB at the default grid (20 480 vertices, 40 386 triangles). The mesh
+is cached against the picture's own bytes, so a call re-reading it on every phase
+change costs 3 ms.
+
+The renderer is **written here rather than pulled in**: the shared module table
+has no 3D library, and a private copy of three.js would be about 2 MB for the one
+thing this needs. The shader is verified by compiling and linking it against a
+real GL context and reading the rendered pixels back, not by reading it.
+
 ## Voice settings
 
 The plugin adds a **Voice call** page to Settings, where the voice is chosen and
@@ -343,6 +380,9 @@ unavailable; the local and cloud voices are unaffected.
 - **A character's voice and rate override the settings while it is in use.** The
   cloud-fallback switch stays deployment-wide: it decides whether audio may leave
   this machine, which is not a property of who is speaking.
+- **The 3D figure needs its depth model.** It is `depth-anything-v2-small.onnx`
+  (47 MB) under `~/.dsh/voice-call/models/`. Without it the call falls back to the
+  flat picture, and `relief: false` switches the figure off entirely.
 - **A clone upload is converted with ffmpeg.** The plugin runs `ffmpeg` from
   `PATH`; set `ffmpegPath` if it lives elsewhere. Without ffmpeg, only a file
   that is already 16 kHz mono PCM16 WAV can be used, and the upload reports why.

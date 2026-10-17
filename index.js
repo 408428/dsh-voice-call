@@ -22,6 +22,7 @@ import { constants } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createHash } from 'node:crypto'
 import z from '@deepseek-ai/schemastery'
 
 /** Cordis plugin name; the Loader row id in `cordis.patch.yml` matches it. */
@@ -105,6 +106,23 @@ export const Config = z.object({
   cloneDir: z.string().default(''),
   /** Directory holding characters; empty selects the default under the Harness home. */
   characterDir: z.string().default(''),
+  /**
+   * Whether an uploaded picture is also turned into a 3D relief for the call
+   * screen. Off leaves calls on the flat picture, which needs no depth model.
+   */
+  relief: z.boolean().default(true).volatile(),
+  /** The depth model used for the relief; empty selects the default under the Harness home. */
+  depthModel: z.string().default(''),
+  /**
+   * Vertex count along the longer side of the relief mesh.
+   *
+   * A call is watched at a glance, so the mesh is deliberately coarse: 160 keeps
+   * the payload near half a megabyte, where 300 would quadruple it for detail
+   * that is not visible on a phone.
+   */
+  reliefGrid: z.natural().min(32).max(400).default(160).volatile(),
+  /** How far the nearest pixel is pushed out, in scene units. */
+  reliefDepth: z.number().min(0).max(1).default(0.22).volatile(),
   /**
    * The character a call is placed as; empty means no character is selected and
    * the voice settings above apply directly.
@@ -908,6 +926,11 @@ function localPaths(config) {
     avatar: config.avatarFile || join(root, 'avatar.img'),
     worker: join(PLUGIN_DIR, 'piper_worker.py'),
     cloneWorker: join(PLUGIN_DIR, 'xtts_worker.py'),
+    // The depth model that turns a picture into a relief mesh. Beside the
+    // speech models because it is the same kind of asset: fetched once, then
+    // read from disk on every call.
+    depthModel: config.depthModel || join(root, 'models', 'depth-anything-v2-small.onnx'),
+    reliefWorker: join(PLUGIN_DIR, 'relief_worker.py'),
   }
 }
 
@@ -1118,8 +1141,14 @@ class LocalEngine {
       return
     }
     this.pending.delete(message.id)
-    if (message.error !== undefined) settle.reject(new Error(message.error))
-    else settle.resolve(Buffer.from(message.wav, 'base64'))
+    if (message.error !== undefined) {
+      settle.reject(new Error(message.error))
+      return
+    }
+    // A speech worker answers with `wav`; the relief worker answers with mesh
+    // fields. Resolving on the presence of `wav` keeps one reply path for both
+    // without making the speech caller unwrap an envelope it never needs.
+    settle.resolve(message.wav === undefined ? message : Buffer.from(message.wav, 'base64'))
   }
 
   /**
@@ -1131,6 +1160,24 @@ class LocalEngine {
    * @returns PCM16 WAV bytes.
    */
   async speak(text, options = {}) {
+    return await this.request({
+      text,
+      rate: options.rate ?? 1,
+      ...options.speakerWav === undefined ? {} : { speaker_wav: options.speakerWav },
+    })
+  }
+
+  /**
+   * Send one request to the worker and await its reply.
+   *
+   * Shared by every worker protocol, because they differ only in the fields they
+   * carry: the id, the queueing, the timeout, and the failure handling are the
+   * same for a sentence and for a mesh.
+   *
+   * @param body - the request fields, without the id.
+   * @returns the reply, whose shape depends on the worker.
+   */
+  async request(body) {
     const run = this.queue.then(async () => {
       const child = await this.start()
       const id = String(this.nextId++)
@@ -1139,20 +1186,15 @@ class LocalEngine {
       const timer = setTimeout(() => {
         if (this.pending.delete(id)) settled.reject(new Error(`${this.options.label} timed out`))
       }, this.options.timeoutMs)
-      child.stdin.write(`${JSON.stringify({
-        id,
-        text,
-        rate: options.rate ?? 1,
-        ...options.speakerWav === undefined ? {} : { speaker_wav: options.speakerWav },
-      })}\n`)
+      child.stdin.write(`${JSON.stringify({ id, ...body })}\n`)
       try {
         return await settled.promise
       } finally {
         clearTimeout(timer)
       }
     })
-    // Keep the chain alive after a failure so one bad utterance does not wedge
-    // every later request behind a rejected promise.
+    // Keep the chain alive after a failure so one bad request does not wedge
+    // every later one behind a rejected promise.
     this.queue = run.then(() => undefined, () => undefined)
     return run
   }
@@ -1705,7 +1747,24 @@ export function apply(ctx, config) {
     timeoutMs: config.cloneTimeoutMs,
     require: [],
   })
-  ctx.effect(() => () => { piper.dispose(); clone.dispose() }, 'voice-call local voices')
+  // The relief engine is separate from the speech ones: it loads a different
+  // model, it is only touched when a picture is rendered, and a call that never
+  // shows a 3D figure must not pay for loading it.
+  /**
+   * The most recent relief mesh, with the picture hash it was built from.
+   *
+   * A call re-reads the mesh on every phase change, so it is cached: only a new
+   * picture invalidates it.
+   */
+  const reliefCache = { key: '', mesh: null }
+  const relief = new LocalEngine(ctx, config, {
+    label: 'relief engine',
+    worker: localPaths(config).reliefWorker,
+    args: [localPaths(config).depthModel],
+    timeoutMs: config.cloneTimeoutMs,
+    require: [],
+  })
+  ctx.effect(() => () => { piper.dispose(); clone.dispose(); relief.dispose() }, 'voice-call local voices')
   /**
    * Cached route ranking. Probing costs a request per provider, so the answer is
    * held for `routeTtlMs` and shared by every call in between.
@@ -2098,6 +2157,48 @@ export function apply(ctx, config) {
           voice.label = (await resolveVoice(ctx, config, effectiveVoice())).label
           await persistVoice(ctx, voice, character)
           json(res, 200, { activeCharacter: character.id, voice: voice.label })
+          return
+        }
+        if (route === `${ROUTE_PREFIX}/relief` && (req.method === 'GET' || req.method === 'HEAD')) {
+          // The mesh for the picture a call should show. Built from the same
+          // effective picture `/call-avatar` serves, so the relief and the flat
+          // avatar can never disagree about whose face is on screen.
+          await ensureVoice()
+          if (!readConfig(config.relief, true)) {
+            json(res, 200, { relief: null, reason: 'disabled' }, { 'cache-control': 'no-store' })
+            return
+          }
+          await refreshCharacter()
+          const fromCharacter = character.record === null ? undefined : await readCharacterAvatar(config, character.id)
+          const stored = fromCharacter ?? await readAvatar(config)
+          if (stored === undefined) {
+            json(res, 200, { relief: null, reason: 'no-picture' }, { 'cache-control': 'no-store' })
+            return
+          }
+          // Keyed by the picture's own bytes, so replacing the picture rebuilds
+          // the mesh and nothing else does. A call re-reads this on every phase
+          // change, and rebuilding 500 KB of geometry each time would be waste.
+          const key = createHash('sha256').update(stored.bytes).digest('hex').slice(0, 24)
+          if (reliefCache.key !== key) {
+            const image = join(work, 'relief-input.img')
+            await writeFile(image, stored.bytes)
+            const started = Date.now()
+            const reply = await relief.request({
+              image,
+              grid: readConfig(config.reliefGrid, 160),
+              depth: readConfig(config.reliefDepth, 0.22),
+            }, config.cloneTimeoutMs)
+            reliefCache.key = key
+            reliefCache.mesh = {
+              grid: reply.grid,
+              position: reply.position,
+              color: reply.color,
+              index: reply.index,
+              face: reply.face ?? null,
+            }
+            ctx.logger.info(`voice-call built a relief mesh (${reply.grid.join('x')}) in ${String(Date.now() - started)} ms`)
+          }
+          json(res, 200, { relief: reliefCache.mesh, key }, { 'cache-control': 'no-store' })
           return
         }
         if (route === `${ROUTE_PREFIX}/call-avatar` && (req.method === 'GET' || req.method === 'HEAD')) {

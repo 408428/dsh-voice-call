@@ -1171,18 +1171,346 @@
       /** The avatar with its live speaking ring. */
       function Avatar(props) {
         const hue = hueOf(props.sessionId ?? 'voice-call')
+        const canvasRef = useRef(null)
+        const rendererRef = useRef(null)
+        const meshRef = useRef(null)
+        // The animation runs on its own clock, not on React renders: a mouth
+        // that only moved when a state update happened would stutter.
+        const motionRef = useRef({ mouth: 0, blink: 0, sway: 0, mouthPush: 0, blinkAt: 0, blinkFor: 0 })
+        const level = props.level ?? 0
+        const activity = props.activity
+
+        // Build the renderer once the canvas exists, and rebuild it if the
+        // element is replaced.
+        useEffect(() => {
+          const canvas = canvasRef.current
+          if (canvas === null || props.relief === null || props.relief === undefined) return undefined
+          const renderer = createReliefRenderer(canvas)
+          if (renderer === null) return undefined
+          rendererRef.current = renderer
+          meshRef.current = props.relief
+          renderer.setMesh(props.relief)
+          return () => {
+            renderer.dispose()
+            rendererRef.current = null
+          }
+        }, [props.relief])
+
+        // One animation loop for as long as the figure is on screen.
+        useEffect(() => {
+          if (props.relief === null || props.relief === undefined) return undefined
+          let frame = 0
+          const started = performance.now()
+          const tick = () => {
+            const renderer = rendererRef.current
+            if (renderer !== null) {
+              const now = performance.now()
+              const seconds = (now - started) / 1000
+              const motion = motionRef.current
+              // The mouth follows the reply's loudness, smoothed so it opens and
+              // closes like a mouth rather than flickering with the waveform.
+              const target = activity === 'speaking' ? Math.min(1, level * 5.5) : 0
+              motion.mouth += (target - motion.mouth) * 0.22
+              // A blink every few seconds, which reads as alive without a
+              // schedule anyone can predict.
+              if (motion.blinkFor <= 0 && now > motion.blinkAt) {
+                motion.blinkFor = 140
+                motion.blinkAt = now + 2200 + Math.random() * 4200
+              }
+              if (motion.blinkFor > 0) {
+                motion.blinkFor -= 16
+                motion.blink = Math.sin(Math.max(0, motion.blinkFor) / 140 * Math.PI)
+              } else {
+                motion.blink = 0
+              }
+              // Breathing, plus a slow sway that keeps the relief readable.
+              motion.sway = Math.sin(seconds * 0.42) * 0.11
+              motion.mouthPush = Math.sin(seconds * 1.1) * 0.004
+              renderer.draw({
+                mouth: motion.mouth,
+                blink: motion.blink,
+                sway: motion.sway,
+                mouthPush: motion.mouthPush,
+              })
+            }
+            frame = requestAnimationFrame(tick)
+          }
+          frame = requestAnimationFrame(tick)
+          return () => { cancelAnimationFrame(frame) }
+        }, [props.relief, activity, level])
+
+        const hasRelief = props.relief !== null && props.relief !== undefined
         return h('div', { className: 'dvc-avatar-wrap' },
-          h('span', { className: 'dvc-ring', 'data-active': props.activity === 'speaking' ? 'true' : undefined }),
-          h('span', { className: 'dvc-ring dvc-ring-late', 'data-active': props.activity === 'speaking' ? 'true' : undefined }),
-          // A picture the user chose replaces the generated tile; without one the
-          // session's own colour and initial stand, so a call always has a face.
-          props.avatar === true
-            ? h('img', { className: 'dvc-avatar dvc-avatar-img', src: props.avatarSrc, alt: '' })
-            : h('span', {
-                className: 'dvc-avatar',
-                style: { background: `linear-gradient(150deg, hsl(${hue} 72% 58%), hsl(${(hue + 42) % 360} 68% 42%))` },
-              }, initialOf(props.title)),
+          h('span', { className: 'dvc-ring', 'data-active': activity === 'speaking' ? 'true' : undefined }),
+          h('span', { className: 'dvc-ring dvc-ring-late', 'data-active': activity === 'speaking' ? 'true' : undefined }),
+          // The 3D figure when the Host could build one, otherwise the picture,
+          // otherwise the session's own colour and initial -- so a call always
+          // has a face.
+          hasRelief
+            ? h('canvas', {
+                ref: canvasRef,
+                className: 'dvc-avatar dvc-avatar-3d',
+                'aria-label': props.title ?? '',
+              })
+            : props.avatar === true
+              ? h('img', { className: 'dvc-avatar dvc-avatar-img', src: props.avatarSrc, alt: '' })
+              : h('span', {
+                  className: 'dvc-avatar',
+                  style: { background: `linear-gradient(150deg, hsl(${hue} 72% 58%), hsl(${(hue + 42) % 360} 68% 42%))` },
+                }, initialOf(props.title)),
         )
+      }
+
+
+      /**
+       * A WebGL renderer for one relief mesh.
+       *
+       * Written rather than pulled in: the shared module table has no 3D library,
+       * and a private copy of three.js would be about 2 MB for the one thing this
+       * needs -- drawing a grid of coloured vertices with a slight sway. This is
+       * that, in one place, with no dependencies.
+       *
+       * The mesh arrives as a grid of vertices carrying their own colour, so the
+       * surface is the photograph itself. Motion is applied by moving the whole
+       * object and by bending the mouth and eye regions, which is what makes the
+       * figure look like it is talking rather than being a printed card.
+       *
+       * @param canvas - the canvas to draw into.
+       * @returns a controller, or null when WebGL is unavailable.
+       */
+      function createReliefRenderer(canvas) {
+        const gl = canvas.getContext('webgl', { antialias: true, alpha: true, premultipliedAlpha: false })
+          ?? canvas.getContext('experimental-webgl', { antialias: true, alpha: true })
+        if (gl === null) return null
+
+        const VERTEX = [
+          'attribute vec3 aPosition;',
+          'attribute vec3 aColor;',
+          'uniform mat4 uView;',
+          'uniform mat4 uProject;',
+          'uniform float uOpen;',      // mouth opening, 0..1
+          'uniform vec4 uMouth;',      // mouth box in mesh UV, xy = centre, zw = half size
+          'uniform vec2 uMouthMove;',  // extra push for the mouth, xy
+          'uniform float uBlink;',     // eyelid closing, 0..1
+          'uniform vec4 uEyeL;',
+          'uniform vec4 uEyeR;',
+          'varying vec3 vColor;',
+          // Smooth falloff inside a box, so the bend has no visible edge.
+          'float boxWeight(vec2 uv, vec4 box, float soft) {',
+          '  vec2 d = abs(uv - box.xy) - box.zw;',
+          '  float outside = length(max(d, 0.0));',
+          '  return 1.0 - smoothstep(0.0, soft, outside);',
+          '}',
+          'void main() {',
+          '  vec3 p = aPosition;',
+          '  vec2 uv = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);',
+          // The mouth opens by pushing its vertices forward and apart slightly.
+          '  float mouth = boxWeight(uv, uMouth, 0.055);',
+          '  p.z += mouth * uOpen * 0.10 + mouth * uMouthMove.x;',
+          '  p.y += mouth * uOpen * uMouthMove.y;',
+          // The eyes squash vertically as the lids close.
+          '  float eyeL = boxWeight(uv, uEyeL, 0.030);',
+          '  float eyeR = boxWeight(uv, uEyeR, 0.030);',
+          '  p.y = mix(p.y, uEyeL.y + (p.y - uEyeL.y) * 0.15, eyeL * uBlink);',
+          '  p.y = mix(p.y, uEyeR.y + (p.y - uEyeR.y) * 0.15, eyeR * uBlink);',
+          '  vColor = aColor;',
+          '  gl_Position = uProject * uView * vec4(p, 1.0);',
+          '}',
+        ].join('\n')
+
+        const FRAGMENT = [
+          'precision mediump float;',
+          'varying vec3 vColor;',
+          'uniform float uFade;',
+          'void main() {',
+          '  gl_FragColor = vec4(vColor * uFade, 1.0);',
+          '}',
+        ].join('\n')
+
+        /** Compile one shader stage. */
+        const compile = (type, source) => {
+          const shader = gl.createShader(type)
+          gl.shaderSource(shader, source)
+          gl.compileShader(shader)
+          if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            const log = gl.getShaderInfoLog(shader)
+            gl.deleteShader(shader)
+            throw new Error(`relief shader: ${String(log)}`)
+          }
+          return shader
+        }
+
+        let program
+        try {
+          program = gl.createProgram()
+          gl.attachShader(program, compile(gl.VERTEX_SHADER, VERTEX))
+          gl.attachShader(program, compile(gl.FRAGMENT_SHADER, FRAGMENT))
+          gl.linkProgram(program)
+          if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            throw new Error(`relief link: ${String(gl.getProgramInfoLog(program))}`)
+          }
+        } catch (error) {
+          console.warn('[voice-call] the relief renderer is unavailable:', error)
+          return null
+        }
+        gl.useProgram(program)
+
+        const attr = {
+          position: gl.getAttribLocation(program, 'aPosition'),
+          color: gl.getAttribLocation(program, 'aColor'),
+        }
+        const uniform = {}
+        for (const name of ['uView', 'uProject', 'uOpen', 'uMouth', 'uMouthMove', 'uBlink', 'uEyeL', 'uEyeR', 'uFade']) {
+          uniform[name] = gl.getUniformLocation(program, name)
+        }
+
+        const buffers = { position: gl.createBuffer(), color: gl.createBuffer(), index: gl.createBuffer() }
+        let indexCount = 0
+        let grid = [1, 1]
+        let face = null
+
+        /** A 4x4 identity matrix, as a flat array. */
+        const identity = () => new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
+
+        /**
+         * Build a perspective projection.
+         * @param fovY - vertical field of view, radians.
+         * @param aspect - width divided by height.
+         * @param near - near plane.
+         * @param far - far plane.
+         */
+        const perspective = (fovY, aspect, near, far) => {
+          const f = 1 / Math.tan(fovY / 2)
+          const nf = 1 / (near - far)
+          return new Float32Array([
+            f / aspect, 0, 0, 0,
+            0, f, 0, 0,
+            0, 0, (far + near) * nf, -1,
+            0, 0, 2 * far * near * nf, 0,
+          ])
+        }
+
+        /**
+         * Build a look-at view matrix.
+         * @param eye - camera position.
+         * @param target - point the camera looks at.
+         */
+        const lookAt = (eye, target) => {
+          const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+          const norm = (v) => {
+            const len = Math.hypot(v[0], v[1], v[2]) || 1
+            return [v[0] / len, v[1] / len, v[2] / len]
+          }
+          const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+          const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+          const z = norm(sub(eye, target))
+          const x = norm(cross([0, 1, 0], z))
+          const y = cross(z, x)
+          return new Float32Array([
+            x[0], y[0], z[0], 0,
+            x[1], y[1], z[1], 0,
+            x[2], y[2], z[2], 0,
+            -dot(x, eye), -dot(y, eye), -dot(z, eye), 1,
+          ])
+        }
+
+        return {
+          /**
+           * Upload one decoded mesh.
+           * @param mesh - grid, position, color, index arrays and face boxes.
+           */
+          setMesh(mesh) {
+            grid = mesh.grid
+            face = mesh.face
+            indexCount = mesh.index.length
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffers.position)
+            gl.bufferData(gl.ARRAY_BUFFER, mesh.position, gl.STATIC_DRAW)
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffers.color)
+            // Colours arrive as bytes; normalize scales them to 0..1.
+            gl.bufferData(gl.ARRAY_BUFFER, mesh.color, gl.STATIC_DRAW)
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffers.index)
+            gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.index, gl.STATIC_DRAW)
+          },
+
+          /**
+           * Draw one frame.
+           * @param options - mouth opening, blink, sway, and mouth motion.
+           */
+          draw(options) {
+            const ratio = window.devicePixelRatio || 1
+            const width = Math.max(1, Math.round(canvas.clientWidth * ratio))
+            const height = Math.max(1, Math.round(canvas.clientHeight * ratio))
+            if (canvas.width !== width || canvas.height !== height) {
+              canvas.width = width
+              canvas.height = height
+            }
+            gl.viewport(0, 0, width, height)
+            gl.clearColor(0, 0, 0, 0)
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+            if (indexCount === 0) return
+            gl.enable(gl.DEPTH_TEST)
+            gl.enable(gl.CULL_FACE)
+            gl.cullFace(gl.BACK)
+            gl.useProgram(program)
+
+            // The camera stays close and slightly to one side, so the relief is
+            // visible without ever turning far enough to show that it is flat.
+            const sway = options.sway ?? 0
+            const eye = [Math.sin(sway) * 0.55, 0.06 + Math.sin(sway * 0.7) * 0.05, 2.35]
+            gl.uniformMatrix4fv(uniform.uView, false, lookAt(eye, [0, 0, 0]))
+            gl.uniformMatrix4fv(uniform.uProject, false, perspective(0.72, width / height, 0.1, 12))
+
+            gl.uniform1f(uniform.uOpen, options.mouth ?? 0)
+            gl.uniform1f(uniform.uBlink, options.blink ?? 0)
+            gl.uniform1f(uniform.uFade, options.fade ?? 1)
+            // A picture with no face found keeps the mouth near the middle, low
+            // enough to read as a mouth, rather than failing to animate.
+            const box = (value, fallback) => (Array.isArray(value) ? value : fallback)
+            const mouth = box(face?.mouth, [0.35, 0.55, 0.15, 0.05])
+            const eyeL = box(face?.leftEye, [0.32, 0.38, 0.09, 0.04])
+            const eyeR = box(face?.rightEye, [0.68, 0.38, 0.09, 0.04])
+            // The shader works in mesh UV, where y grows downward, so a box given
+            // as [x, y, w, h] from the top becomes a centre plus half size.
+            const toUv = (b) => [b[0] + b[2] / 2, b[1] + b[3] / 2, b[2] / 2, b[3] / 2]
+            gl.uniform4fv(uniform.uMouth, toUv(mouth))
+            gl.uniform4fv(uniform.uEyeL, toUv(eyeL))
+            gl.uniform4fv(uniform.uEyeR, toUv(eyeR))
+            gl.uniform2fv(uniform.uMouthMove, [0, options.mouthPush ?? 0])
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffers.position)
+            gl.enableVertexAttribArray(attr.position)
+            gl.vertexAttribPointer(attr.position, 3, gl.FLOAT, false, 0, 0)
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffers.color)
+            gl.enableVertexAttribArray(attr.color)
+            gl.vertexAttribPointer(attr.color, 3, gl.UNSIGNED_BYTE, true, 0, 0)
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffers.index)
+            gl.drawElements(gl.TRIANGLES, indexCount, gl.UNSIGNED_SHORT, 0)
+          },
+
+          /** Release every GPU object. */
+          dispose() {
+            gl.deleteBuffer(buffers.position)
+            gl.deleteBuffer(buffers.color)
+            gl.deleteBuffer(buffers.index)
+            gl.deleteProgram(program)
+          },
+        }
+      }
+
+      /**
+       * Decode one relief payload into typed arrays.
+       *
+       * @param part - the encoded field.
+       * @returns a typed array of the type the payload names.
+       */
+      function decodeReliefField(part) {
+        const binary = atob(part.base64)
+        const bytes = new Uint8Array(binary.length)
+        for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
+        if (part.type === 'f32') return new Float32Array(bytes.buffer)
+        if (part.type === 'u8') return new Uint8Array(bytes.buffer)
+        if (part.type === 'u16') return new Uint16Array(bytes.buffer)
+        return new Uint32Array(bytes.buffer)
       }
 
       /** Spoken-transcript bubbles, newest last. */
@@ -1211,6 +1539,11 @@
         // to the next call without a reload, and the overlay stays independent of
         // the settings page's own store.
         const [avatar, setAvatar] = useState({ set: false, src: '' })
+        // The relief mesh for the same picture, when the Host could build one.
+        // Null means the flat picture stands, which is what happens with no
+        // picture, with the feature switched off, or on a machine without the
+        // depth model.
+        const [relief, setRelief] = useState(null)
         const phase = state.phase
         useEffect(() => {
           if (phase === 'idle') return undefined
@@ -1226,6 +1559,29 @@
               if (type === null || type === 'none') { setAvatar({ set: false, src: '' }); return }
               setAvatar({ set: true, src: `/.dsh-voice-call/call-avatar?rev=${String(Date.now())}` })
             } catch { /* no picture is the same as an unreadable one */ }
+          })()
+          return () => { live = false }
+        }, [phase])
+        // The mesh is fetched once per call, from the same effective picture.
+        // Decoding 500 KB of geometry on every phase change would stall the
+        // animation, so the decoded form is kept and reused.
+        useEffect(() => {
+          if (phase === 'idle') { setRelief(null); return undefined }
+          let live = true
+          void (async () => {
+            try {
+              const response = await fetch('/.dsh-voice-call/relief')
+              if (!live || !response.ok) return
+              const body = await response.json()
+              if (body.relief === null) return
+              setRelief({
+                grid: body.relief.grid,
+                position: decodeReliefField(body.relief.position),
+                color: decodeReliefField(body.relief.color),
+                index: decodeReliefField(body.relief.index),
+                face: body.relief.face ?? null,
+              })
+            } catch { /* the flat picture stands */ }
           })()
           return () => { live = false }
         }, [phase])
@@ -1250,7 +1606,10 @@
             h('div', { className: 'dvc-phase' }, t(`phase.${state.phase}`)),
             h(Avatar, {
               title: state.title, sessionId: state.sessionId, activity: state.activity,
-              avatar: avatar.set, avatarSrc: avatar.src,
+              avatar: avatar.set, avatarSrc: avatar.src, relief,
+              // The same loudness the meter shows, which is what makes the
+              // mouth match the sound the user actually hears.
+              level: state.level,
             }),
             h('div', { className: 'dvc-title' }, state.title || state.sessionId),
             h('div', { className: 'dvc-hint' }, hint),
@@ -2036,6 +2395,7 @@
 .dvc-avatar-wrap{position:relative;display:grid;place-items:center;width:104px;height:104px}
 .dvc-avatar{display:grid;place-items:center;width:88px;height:88px;border-radius:999px;color:var(--dsw-alias-label-primary-inverted);font-size:34px;font-weight:600;box-shadow:var(--dsw-shadow-lv2)}
 .dvc-avatar-img{object-fit:cover;background:var(--dsw-alias-bg-base)}
+.dvc-avatar-3d{display:block;background:transparent}
 .dvc-ring{position:absolute;inset:0;border-radius:999px;border:2px solid var(--dsw-alias-brand-primary);opacity:0;transform:scale(.86)}
 .dvc-ring[data-active]{animation:dvc-pulse 1.6s ease-out infinite}
 .dvc-ring-late[data-active]{animation-delay:.8s}

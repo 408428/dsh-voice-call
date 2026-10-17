@@ -106,6 +106,8 @@ export const Config = z.object({
   cloneDir: z.string().default(''),
   /** Directory holding characters; empty selects the default under the Harness home. */
   characterDir: z.string().default(''),
+  /** The picture the 3D figure is built from; empty selects the default. */
+  figureFile: z.string().default(''),
   /**
    * Whether an uploaded picture is also turned into a 3D relief for the call
    * screen. Off leaves calls on the flat picture, which needs no depth model.
@@ -592,6 +594,23 @@ async function saveCalibration(ctx, config, key, boxes) {
 }
 
 /**
+ * Read the picture the 3D figure should be built from.
+ *
+ * The figure has its own picture because it wants a different crop from the
+ * avatar. When none is set the avatar stands in, so an existing setup keeps
+ * working and a user who only ever uploads one picture gets a figure anyway.
+ *
+ * @param config - validated plugin configuration.
+ * @returns the image and its type, plus whether it came from the figure slot.
+ */
+async function readFigure(config) {
+  const own = await readAvatarAt(localPaths(config).figure)
+  if (own !== undefined) return { ...own, fromFigure: true }
+  const fallback = await readAvatar(config)
+  return fallback === undefined ? undefined : { ...fallback, fromFigure: false }
+}
+
+/**
  * Store one character's picture.
  * @param config - validated plugin configuration.
  * @param id - character id.
@@ -978,6 +997,10 @@ function localPaths(config) {
     voiceDir: config.voiceDir || join(root, 'models'),
     cloneDir: config.cloneDir || join(root, 'voices'),
     avatar: config.avatarFile || join(root, 'avatar.img'),
+    // The picture the 3D figure is built from, kept apart from the avatar: the
+    // avatar is a small round thumbnail, the figure wants a face-filling crop,
+    // and forcing one image to be both is why they could not be chosen apart.
+    figure: config.figureFile || join(root, 'figure.img'),
     worker: join(PLUGIN_DIR, 'piper_worker.py'),
     cloneWorker: join(PLUGIN_DIR, 'xtts_worker.py'),
     // The depth model that turns a picture into a relief mesh. Beside the
@@ -2213,6 +2236,52 @@ export function apply(ctx, config) {
           json(res, 200, { activeCharacter: character.id, voice: voice.label })
           return
         }
+        if (route === `${ROUTE_PREFIX}/figure` && (req.method === 'GET' || req.method === 'HEAD')) {
+          // The picture the 3D figure is built from, on its own route so the
+          // settings page can preview it without asking for a mesh.
+          const stored = await readFigure(config)
+          if (stored === undefined) {
+            if (req.method === 'HEAD') { res.writeHead(200, { 'x-figure': 'none' }); res.end(); return }
+            json(res, 200, { figure: null }, { 'cache-control': 'no-store' })
+            return
+          }
+          if (req.method === 'HEAD') {
+            res.writeHead(200, { 'x-figure': stored.type, 'x-figure-source': stored.fromFigure ? 'own' : 'avatar' })
+            res.end()
+            return
+          }
+          res.writeHead(200, {
+            'content-type': stored.type,
+            'cache-control': 'no-store',
+            'content-length': stored.bytes.length,
+          })
+          res.end(stored.bytes)
+          return
+        }
+        if (route === `${ROUTE_PREFIX}/figure` && req.method === 'POST') {
+          const type = String(req.headers['content-type'] ?? '').split(';')[0].trim()
+          if (!AVATAR_TYPES.has(type)) throw new RequestError(`Picture must be one of: ${[...AVATAR_TYPES].join(', ')}`, 400)
+          const bytes = await readBody(req, config.maxAvatarBytes)
+          if (bytes.length === 0) throw new RequestError('No image was sent', 400)
+          const path = localPaths(config).figure
+          await mkdir(dirname(path), { recursive: true })
+          await writeFile(path, bytes)
+          await writeFile(`${path}.type`, type, 'utf8')
+          // A new figure picture invalidates the mesh and any marks placed on the
+          // old one, because both describe a picture that is no longer in use.
+          reliefCache.key = ''
+          ctx.logger.info(`voice-call stored a figure picture (${type}, ${String(bytes.length)} bytes)`)
+          json(res, 201, { figure: { type, bytes: bytes.length } })
+          return
+        }
+        if (route === `${ROUTE_PREFIX}/figure` && req.method === 'DELETE') {
+          const path = localPaths(config).figure
+          await rm(path, { force: true })
+          await rm(`${path}.type`, { force: true })
+          reliefCache.key = ''
+          json(res, 200, { figure: null })
+          return
+        }
         if (route === `${ROUTE_PREFIX}/relief` && (req.method === 'GET' || req.method === 'HEAD')) {
           // The mesh for the picture a call should show. Built from the same
           // effective picture `/call-avatar` serves, so the relief and the flat
@@ -2223,10 +2292,12 @@ export function apply(ctx, config) {
             return
           }
           await refreshCharacter()
-          const fromCharacter = character.record === null ? undefined : await readCharacterAvatar(config, character.id)
-          const stored = fromCharacter ?? await readAvatar(config)
+          // The FIGURE picture, which is its own slot and falls back to the
+          // avatar. A character's avatar is a thumbnail, so it is not consulted
+          // here: the figure is a deployment-wide render of one face.
+          const stored = await readFigure(config)
           if (stored === undefined) {
-            json(res, 200, { relief: null, reason: 'no-picture' }, { 'cache-control': 'no-store' })
+            json(res, 200, { relief: null, reason: 'no-figure' }, { 'cache-control': 'no-store' })
             return
           }
           // Keyed by the picture's own bytes, so replacing the picture rebuilds

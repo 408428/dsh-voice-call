@@ -89,6 +89,16 @@
           'settings.avatarWorking': 'Uploading…',
           'settings.avatarOk': 'The call picture is set.',
           'settings.avatarCleared': 'The call picture was removed.',
+          'settings.figure': '3D figure picture',
+          'settings.figureHint': 'The picture the 3D figure is built from. Use a clear, front-facing face that fills the frame; it is separate from the avatar above, which is only a thumbnail.',
+          'settings.figureChoose': 'Choose a picture',
+          'settings.figureUpload': 'Use for the 3D figure',
+          'settings.figureWorking': 'Uploading...',
+          'settings.figureClear': 'Remove',
+          'settings.figureOk': 'The 3D figure picture is set.',
+          'settings.figureCleared': 'The 3D figure picture was removed; the avatar stands in.',
+          'settings.figureBorrowed': 'No picture of its own yet, so the avatar above is being used. A face-filling picture gives the figure much more to work with.',
+          'settings.figureFailed': 'Could not save the picture: {message}',
           'settings.calibrate': 'Mouth and eyes',
           'settings.calibrateHint': 'Drag each mark onto the mouth and the eyes. The figure opens its mouth and blinks there, so a picture of a drawing usually needs this.',
           'settings.calibrateEye': 'Eye',
@@ -216,6 +226,16 @@
           'settings.avatarWorking': '上传中…',
           'settings.avatarOk': '通话头像已设置。',
           'settings.avatarCleared': '通话头像已移除。',
+          'settings.figure': '3D 形象图片',
+          'settings.figureHint': '用来生成 3D 形象的图片。请用正面、脸占满画面的照片；它和上面的头像分开，头像是小缩略图。',
+          'settings.figureChoose': '选择图片',
+          'settings.figureUpload': '用作 3D 形象',
+          'settings.figureWorking': '上传中...',
+          'settings.figureClear': '移除',
+          'settings.figureOk': '3D 形象图片已设置。',
+          'settings.figureCleared': '3D 形象图片已移除，改用头像。',
+          'settings.figureBorrowed': '还没有单独的图片，目前用的是上面的头像。换成脸占满画面的图片效果会好很多。',
+          'settings.figureFailed': '保存图片失败：{message}',
           'settings.calibrate': '嘴和眼睛位置',
           'settings.calibrateHint': '把两个标记拖到嘴和眼睛上。形象会在这里张嘴和眨眼，所以动漫/插画一般需要手动标一下。',
           'settings.calibrateEye': '眼睛',
@@ -1214,7 +1234,13 @@
           const canvas = canvasRef.current
           if (canvas === null || props.relief === null || props.relief === undefined) return undefined
           const renderer = createReliefRenderer(canvas)
-          if (renderer === null) return undefined
+          if (renderer === null) {
+            // No WebGL: say so and let the picture stand, rather than leaving an
+            // empty canvas where a face should be.
+            console.warn('[voice-call] WebGL is unavailable, so the 3D figure cannot be drawn')
+            props.onReliefFailed?.()
+            return undefined
+          }
           rendererRef.current = renderer
           meshRef.current = props.relief
           renderer.setMesh(props.relief)
@@ -1597,15 +1623,17 @@
         // picture, with the feature switched off, or on a machine without the
         // depth model.
         const [relief, setRelief] = useState(null)
+        // A mesh the renderer could not use, so the picture stands instead of a
+        // blank canvas. Set when WebGL is missing or the shader will not build.
+        const [reliefBroken, setReliefBroken] = useState(false)
         const phase = state.phase
         useEffect(() => {
           if (phase === 'idle') return undefined
           let live = true
           void (async () => {
             try {
-              // The EFFECTIVE picture: the active character's when it has one,
-              // otherwise the deployment's own. Reading `/avatar` here would
-              // ignore a character entirely.
+              // The avatar is the small round thumbnail: the active character's
+              // picture when it has one, otherwise the deployment's own.
               const response = await fetch('/.dsh-voice-call/call-avatar', { method: 'HEAD' })
               if (!live || !response.ok) return
               const type = response.headers.get('x-avatar')
@@ -1663,6 +1691,9 @@
               // The same loudness the meter shows, which is what makes the
               // mouth match the sound the user actually hears.
               level: state.level,
+              // The figure is only used when it can actually be drawn.
+              relief: reliefBroken ? null : relief,
+              onReliefFailed: () => { setReliefBroken(true) },
             }),
             h('div', { className: 'dvc-title' }, state.title || state.sessionId),
             h('div', { className: 'dvc-hint' }, hint),
@@ -1746,6 +1777,15 @@
           avatarSet: false,
           /** A cache-busting token, so a replaced picture is not served from cache. */
           avatarRev: 0,
+          /**
+           * The picture the 3D figure is built from, which is its own slot: the
+           * avatar is a thumbnail, the figure wants a face-filling crop, so they
+           * are chosen apart. When no figure is set the avatar stands in.
+           */
+          figureSet: false,
+          /** Whether the figure has its own picture rather than borrowing the avatar. */
+          figureOwn: false,
+          figureRev: 0,
         })
         const write = async (patch) => {
           store.set({ saving: true, notice: null })
@@ -1776,6 +1816,7 @@
               voices: body.voices ?? [],
               cloudVoices: body.cloudVoices ?? [],
               avatarSet: await readAvatarState(),
+              ...(await readFigureState()),
               ...body.settings,
             })
           } catch (error) {
@@ -1858,6 +1899,52 @@
           }
         }
         /** Drop the stored picture and fall back to the generated avatar. */
+        /**
+         * Read whether a figure picture is set, and whether it is its own.
+         * @returns the figure state, to merge into the store.
+         */
+        const readFigureState = async () => {
+          try {
+            const response = await fetch('/.dsh-voice-call/figure', { method: 'HEAD' })
+            if (!response.ok) return { figureSet: false, figureOwn: false, figureRev: Date.now() }
+            const type = response.headers.get('x-figure')
+            if (type === null || type === 'none') return { figureSet: false, figureOwn: false, figureRev: Date.now() }
+            return { figureSet: true, figureOwn: response.headers.get('x-figure-source') === 'own', figureRev: Date.now() }
+          } catch {
+            return { figureSet: false, figureOwn: false, figureRev: Date.now() }
+          }
+        }
+        /**
+         * Upload the picture the 3D figure is built from.
+         * @param file - the chosen image.
+         */
+        const uploadFigure = async (file) => {
+          store.set({ saving: true, notice: null })
+          try {
+            const response = await fetch('/.dsh-voice-call/figure', {
+              method: 'POST',
+              headers: { 'content-type': file.type || 'image/png' },
+              body: await file.arrayBuffer(),
+            })
+            if (!response.ok) {
+              const body = await response.json().catch(() => null)
+              throw new Error(body?.error ?? `HTTP ${String(response.status)}`)
+            }
+            store.set({ saving: false, ...(await readFigureState()), notice: { key: 'settings.figureOk' } })
+          } catch (error) {
+            store.set({ saving: false, notice: { key: 'settings.figureFailed', params: { message: String(error?.message ?? error) } } })
+          }
+        }
+        /** Remove the figure picture, so the avatar stands in again. */
+        const clearFigure = async () => {
+          store.set({ saving: true, notice: null })
+          try {
+            await fetch('/.dsh-voice-call/figure', { method: 'DELETE' })
+            store.set({ saving: false, ...(await readFigureState()), notice: { key: 'settings.figureCleared' } })
+          } catch (error) {
+            store.set({ saving: false, notice: { key: 'settings.figureFailed', params: { message: String(error?.message ?? error) } } })
+          }
+        }
         const clearAvatar = async () => {
           store.set({ saving: true, notice: null })
           try {
@@ -1868,7 +1955,7 @@
             store.set({ saving: false, notice: { key: 'settings.avatarFailed', params: { message: String(error?.message ?? error) } } })
           }
         }
-        return { store, load, write, clone, removeVoice, uploadAvatar, clearAvatar }
+        return { store, load, write, clone, removeVoice, uploadAvatar, clearAvatar, uploadFigure, clearFigure }
       }
 
       /**
@@ -2054,11 +2141,13 @@
         const [name, setName] = useState('')
         const [file, setFile] = useState(null)
         const [image, setImage] = useState(null)
+        const [figure, setFigure] = useState(null)
         useEffect(() => { void settings.load() }, [settings])
         // The characters block is its own controller, so it loads itself.
         useEffect(() => { void characters.read() }, [characters])
         const pick = (event) => { setFile(event.target.files?.[0] ?? null) }
         const pickImage = (event) => { setImage(event.target.files?.[0] ?? null) }
+        const pickFigure = (event) => { setFigure(event.target.files?.[0] ?? null) }
         const local = state.voices.filter((voice) => voice.engine === 'piper')
         const clones = state.voices.filter((voice) => voice.engine === 'clone')
         const selected = state.cloneId !== '' ? state.cloneId : state.localVoiceId
@@ -2167,9 +2256,41 @@
                     disabled: state.saving,
                     onClick: () => { void settings.clearAvatar() },
                   }, t('settings.avatarClear'))
+                : null)),
+          // The 3D figure's own picture. Separate from the avatar above because
+          // the two want different crops: a thumbnail reads at 88px, while the
+          // figure needs the face filling the frame to have anything to animate.
+          h('section', { className: 'dvc-set-block' },
+            h('span', { className: 'dvc-set-label' }, t('settings.figure')),
+            h('p', { className: 'dvc-set-note' }, t('settings.figureHint')),
+            h('div', { className: 'dvc-set-row' },
+              state.figureSet
+                ? h('img', {
+                    className: 'dvc-set-avatar',
+                    src: `/.dsh-voice-call/figure?rev=${String(state.figureRev)}`,
+                    alt: t('settings.figure'),
+                  })
+                : null,
+              h('label', { className: 'dvc-set-file' },
+                h('input', { type: 'file', accept: 'image/png,image/jpeg,image/webp,image/gif', onChange: pickFigure }),
+                figure === null ? t('settings.figureChoose') : figure.name),
+              h('button', {
+                type: 'button', className: 'dvc-set-primary',
+                disabled: figure === null || state.saving,
+                onClick: () => { if (figure !== null) void settings.uploadFigure(figure) },
+              }, state.saving ? t('settings.figureWorking') : t('settings.figureUpload')),
+              state.figureOwn
+                ? h('button', {
+                    type: 'button', className: 'dvc-set-quiet',
+                    disabled: state.saving,
+                    onClick: () => { void settings.clearFigure() },
+                  }, t('settings.figureClear'))
                 : null),
-            // Marking the face belongs with the picture, because it describes
-            // where the features are in that picture.
+            state.figureSet && !state.figureOwn
+              ? h('p', { className: 'dvc-set-note' }, t('settings.figureBorrowed'))
+              : null,
+            // Marking the face belongs with the figure picture, because it
+            // describes where the features are in THAT picture.
             h('span', { className: 'dvc-set-label' }, t('settings.calibrate')),
             h(FaceCalibration, { settings, t })),
           // Cloning.
@@ -2238,7 +2359,7 @@
             setSource(body.relief.faceSource ?? 'auto')
           } catch { /* no relief means nothing to calibrate */ }
         }, [])
-        useEffect(() => { void load() }, [load, state.avatarRev, state.avatarSet])
+        useEffect(() => { void load() }, [load, state.figureRev, state.figureSet])
 
         // Pointer moves are tracked on the window so a drag that leaves the
         // picture still follows the pointer instead of stopping at its edge.
@@ -2305,7 +2426,7 @@
           }
         }
 
-        if (!state.avatarSet) return h('p', { className: 'dvc-set-note' }, t('settings.calibrateNoPicture'))
+        if (!state.figureSet) return h('p', { className: 'dvc-set-note' }, t('settings.calibrateNoPicture'))
         if (boxes === null) return h('p', { className: 'dvc-set-note' }, t('settings.calibrateNoRelief'))
 
         // The marks are drawn as percentages over the picture, so they follow it
@@ -2330,7 +2451,7 @@
         return h('div', { className: 'dvc-calibrate' },
           h('div', { className: 'dvc-calibrate-stage' },
             h('div', { className: 'dvc-calibrate-area', ref: areaRef },
-              h('img', { className: 'dvc-calibrate-img', src: `/.dsh-voice-call/call-avatar?rev=${String(state.avatarRev)}`, alt: '' }),
+              h('img', { className: 'dvc-calibrate-img', src: `/.dsh-voice-call/figure?rev=${String(state.figureRev)}`, alt: '' }),
               mark('leftEye', t('settings.calibrateEye'), 'var(--dsw-alias-brand-primary)'),
               mark('rightEye', t('settings.calibrateEye'), 'var(--dsw-alias-brand-primary)'),
               mark('mouth', t('settings.calibrateMouth'), 'var(--dsw-alias-state-error-primary)'))),
@@ -2602,7 +2723,7 @@
 .dvc-avatar-wrap{position:relative;display:grid;place-items:center;width:104px;height:104px}
 .dvc-avatar{display:grid;place-items:center;width:88px;height:88px;border-radius:999px;color:var(--dsw-alias-label-primary-inverted);font-size:34px;font-weight:600;box-shadow:var(--dsw-shadow-lv2)}
 .dvc-avatar-img{object-fit:cover;background:var(--dsw-alias-bg-base)}
-.dvc-avatar-3d{display:block;background:transparent}
+.dvc-avatar-3d{display:block;width:88px;height:88px;background:transparent;box-shadow:none}
 .dvc-calibrate{display:flex;flex-direction:column;gap:10px}
 .dvc-calibrate-stage{display:flex;justify-content:center}
 .dvc-calibrate-area{position:relative;width:100%;max-width:260px;line-height:0;touch-action:none}

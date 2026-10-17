@@ -233,7 +233,12 @@ may leave this machine at all, which is not a property of who is speaking.
 ## The 3D figure
 
 An uploaded picture can become a **relief** that the call animates, instead of a
-flat image. A depth model estimates how near each pixel is, the pixels are pushed
+flat image.
+
+The figure has **its own picture**, separate from the avatar. The two want
+different crops: an avatar reads as a small round thumbnail, while the figure
+needs the face filling the frame to have anything to animate. When no figure
+picture is set the avatar stands in, so one upload still works. A depth model estimates how near each pixel is, the pixels are pushed
 along that axis, and the result is a mesh whose vertices carry their own colour,
 so the surface is the photograph itself.
 

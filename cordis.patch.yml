@@ -133,6 +133,9 @@
         # depth model is 47 MB and lives beside the speech models. Off leaves
         # calls on the flat picture.
         relief: true
+        # The 3D figure's own picture, separate from the avatar; empty selects
+        # ~/.dsh/voice-call/figure.img and falls back to the avatar.
+        figureFile: ''
         reliefGrid: 160
         reliefDepth: 0.22
         depthModel: ''

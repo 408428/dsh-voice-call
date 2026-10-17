@@ -132,53 +132,6 @@ def find_face_from_depth(depth):
     }
 
 
-def find_face(image):
-    """Locate the face in one image, if a detector is available.
-
-    Used only to place the mouth and the eyes, which drive the lip movement and
-    the blink. When no face is found the client falls back to a centre-weighted
-    guess, so a picture of an object still renders.
-
-    @param image - a PIL image in RGB.
-    @returns a dict of normalized boxes, or None.
-    """
-    try:
-        import cv2
-        import numpy as np
-    except Exception:
-        return None
-    try:
-        gray = np.asarray(image.convert("L"), dtype=np.uint8)
-        cascade_path = os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
-        cascade = cv2.CascadeClassifier(cascade_path)
-        if cascade.empty():
-            return None
-        # The detector works on a modest width; a 4000-pixel photo would only be
-        # slower without being more accurate.
-        scale = min(1.0, 640 / max(image.size))
-        if scale < 1.0:
-            small = cv2.resize(gray, (int(gray.shape[1] * scale), int(gray.shape[0] * scale)))
-        else:
-            small = gray
-        faces = cascade.detectMultiScale(small, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40))
-        if len(faces) == 0:
-            return None
-        # The largest box is the subject, not a face in the background.
-        x, y, w, h = max(faces, key=lambda box: box[2] * box[3])
-        height, width = small.shape
-        # The mouth sits in the lower third of a face box and the eyes near the
-        # upper third. These are proportions of the box, not of the image.
-        return {
-            "face": [x / width, y / height, w / width, h / height],
-            "mouth": [(x + w * 0.28) / width, (y + h * 0.66) / height, (w * 0.44) / width, (h * 0.16) / height],
-            "leftEye": [(x + w * 0.18) / width, (y + h * 0.30) / height, (w * 0.22) / width, (h * 0.12) / height],
-            "rightEye": [(x + w * 0.60) / width, (y + h * 0.30) / height, (w * 0.22) / width, (h * 0.12) / height],
-        }
-    except Exception as error:
-        log(f"face detection failed: {error}")
-        return None
-
-
 def build_mesh(image, depth, grid, relief):
     """Build the relief mesh.
 
@@ -322,7 +275,7 @@ def main():
                 # Depth first: it always answers, needs no second model, and a
                 # face detector is only a refinement when one happens to be
                 # installed.
-                "face": find_face_from_depth(depth) or find_face(image),
+                "face": find_face_from_depth(depth),
             })
         except Exception as error:
             emit({"id": request_id, "error": f"{type(error).__name__}: {error}"})

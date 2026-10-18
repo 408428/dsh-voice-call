@@ -89,6 +89,17 @@
           'settings.avatarWorking': 'Uploading…',
           'settings.avatarOk': 'The call picture is set.',
           'settings.avatarCleared': 'The call picture was removed.',
+          'settings.vrm': '3D character model (VRM)',
+          'settings.vrmHint': 'Upload a .vrm model and the call renders it as a real 3D character: its mouth shapes the vowels and its eyes blink, because a VRM carries its own skeleton and face shapes. This replaces the photo figure entirely. Free models are available from sites like VRoid Hub.',
+          'settings.vrmChoose': 'Choose a .vrm file',
+          'settings.vrmUpload': 'Use this model',
+          'settings.vrmWorking': 'Uploading...',
+          'settings.vrmClear': 'Remove model',
+          'settings.vrmInUse': 'A 3D model is in use. Calls show it instead of the picture.',
+          'settings.vrmNone': 'No model yet. Calls use the picture below.',
+          'settings.vrmOk': 'The 3D model is ready.',
+          'settings.vrmCleared': 'The model was removed; the picture stands in again.',
+          'settings.vrmFailed': 'Could not save the model: {message}',
           'settings.figure': '3D figure picture',
           'settings.figureHint': 'The picture the 3D figure is built from. Use a clear, front-facing face that fills the frame; it is separate from the avatar above, which is only a thumbnail.',
           'settings.figureChoose': 'Choose a picture',
@@ -226,6 +237,17 @@
           'settings.avatarWorking': '上传中…',
           'settings.avatarOk': '通话头像已设置。',
           'settings.avatarCleared': '通话头像已移除。',
+          'settings.vrm': '3D 人物模型（VRM）',
+          'settings.vrmHint': '上传一个 .vrm 模型，通话会把它渲染成真正的 3D 人物：嘴型会跟着元音变化、眼睛会眨，因为 VRM 自带骨骼和面部形态。这会完全取代下面的照片形象。免费模型可以从 VRoid Hub 等站点下载。',
+          'settings.vrmChoose': '选择 .vrm 文件',
+          'settings.vrmUpload': '使用这个模型',
+          'settings.vrmWorking': '上传中...',
+          'settings.vrmClear': '移除模型',
+          'settings.vrmInUse': '正在使用 3D 模型，通话时显示它而不是照片。',
+          'settings.vrmNone': '还没有模型，通话时使用下面的照片。',
+          'settings.vrmOk': '3D 模型已就绪。',
+          'settings.vrmCleared': '模型已移除，改回照片形象。',
+          'settings.vrmFailed': '保存模型失败：{message}',
           'settings.figure': '3D 形象图片',
           'settings.figureHint': '用来生成 3D 形象的图片。请用正面、脸占满画面的照片；它和上面的头像分开，头像是小缩略图。',
           'settings.figureChoose': '选择图片',
@@ -1219,6 +1241,14 @@
       /** The avatar with its live speaking ring. */
       function Avatar(props) {
         const hue = hueOf(props.sessionId ?? 'voice-call')
+        // Computed before the effects: they read it, and a `const` declared after
+        // them would throw a temporal-dead-zone error on first render.
+        //
+        // A VRM is a real rigged character, so it wins over the photo relief: it
+        // has a mouth that can shape vowels and eyes that blink by their own
+        // geometry, rather than a region of a photo being stretched.
+        const hasVrm = props.vrm === true && props.live === true
+        const hasRelief = props.relief !== null && props.relief !== undefined
         const canvasRef = useRef(null)
         const rendererRef = useRef(null)
         const meshRef = useRef(null)
@@ -1232,7 +1262,32 @@
         // element is replaced.
         useEffect(() => {
           const canvas = canvasRef.current
-          if (canvas === null || props.relief === null || props.relief === undefined) return undefined
+          if (canvas === null) return undefined
+          // A VRM loads asynchronously (a model is megabytes), so this effect
+          // starts it and stores the controller when it arrives.
+          if (hasVrm) {
+            let live = true
+            void (async () => {
+              try {
+                const figure = await createVrmFigure(canvas)
+                if (!live || figure === null) {
+                  if (live) props.onReliefFailed?.()
+                  return
+                }
+                rendererRef.current = figure
+              } catch (error) {
+                console.warn('[voice-call] the VRM figure could not be shown:', error)
+                if (live) props.onReliefFailed?.()
+              }
+            })()
+            return () => {
+              live = false
+              const figure = rendererRef.current
+              rendererRef.current = null
+              if (figure !== null && typeof figure.dispose === 'function') figure.dispose()
+            }
+          }
+          if (props.relief === null || props.relief === undefined) return undefined
           const renderer = createReliefRenderer(canvas)
           if (renderer === null) {
             // No WebGL: say so and let the picture stand, rather than leaving an
@@ -1248,7 +1303,7 @@
             renderer.dispose()
             rendererRef.current = null
           }
-        }, [props.relief])
+        }, [props.relief, hasVrm])
 
         // One animation loop for as long as the figure is on screen.
         useEffect(() => {
@@ -1293,12 +1348,11 @@
           return () => { cancelAnimationFrame(frame) }
         }, [props.relief, activity, level])
 
-        const hasRelief = props.relief !== null && props.relief !== undefined
         // The figure is only worth showing once the call is live: while it is
         // still ringing, the round thumbnail is the right size for a face at a
         // glance, and a tall portrait panel would take over the screen before
         // there is anything to watch.
-        const showFigure = hasRelief && props.live === true
+        const showFigure = (hasVrm || hasRelief) && props.live === true
         const fallback = props.avatar === true
           ? h('img', { className: 'dvc-avatar dvc-avatar-img', src: props.avatarSrc, alt: '' })
           : h('span', {
@@ -1586,6 +1640,136 @@
         }
       }
 
+
+      /**
+       * A VRM figure, rendered with three.js and three-vrm.
+       *
+       * Loaded on demand rather than shipped in this bundle: three.js and the VRM
+       * loader are about 630 KB compressed, which a deployment using a photo
+       * should not pay for. The modules arrive from the plugin's own `/vendor`
+       * route, so the version is pinned to the plugin.
+       *
+       * A VRM is a real rigged character: it has a skeleton, blend shapes for the
+       * mouth and eyes, and a humanoid bone map. That is what makes a figure able
+       * to speak, as opposed to the photo relief, which can only bend pixels.
+       *
+       * @param canvas - the canvas to draw into.
+       * @returns a promise of a controller, or null when 3D is unavailable.
+       */
+      async function createVrmFigure(canvas) {
+        const base = '/.dsh-voice-call/vendor'
+        let THREE, GLTFLoader, VRMLoaderPlugin, VRMUtils
+        try {
+          // three.module.js imports './three.core.js', so both are needed and the
+          // loader must resolve that relative specifier against this origin.
+          THREE = await import(`${base}/three.module.js`)
+          // three-vrm does not carry a glTF loader: it registers a VRM handler on
+          // the one from three's examples, so both are shipped here.
+          const loaderModule = await import(`${base}/GLTFLoader.js`)
+          GLTFLoader = loaderModule.GLTFLoader
+          const vrmModule = await import(`${base}/three-vrm.module.js`)
+          VRMLoaderPlugin = vrmModule.VRMLoaderPlugin
+          VRMUtils = vrmModule.VRMUtils
+        } catch (error) {
+          console.warn('[voice-call] the 3D runtime could not be loaded:', error)
+          return null
+        }
+        const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true })
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
+        renderer.outputColorSpace = THREE.SRGBColorSpace
+        const scene = new THREE.Scene()
+        // A three-quarter view, close enough that the face fills the panel.
+        const camera = new THREE.PerspectiveCamera(30, 3 / 4, 0.1, 20)
+        camera.position.set(0, 1.36, 1.15)
+        camera.lookAt(0, 1.32, 0)
+        scene.add(new THREE.AmbientLight(0xffffff, 1.6))
+        const key = new THREE.DirectionalLight(0xffffff, 1.4)
+        key.position.set(0.6, 2.2, 1.6)
+        scene.add(key)
+        const rim = new THREE.DirectionalLight(0xbcd4ff, 0.7)
+        rim.position.set(-1.2, 1.6, -0.8)
+        scene.add(rim)
+
+        const loader = new GLTFLoader()
+        loader.register((parser) => new VRMLoaderPlugin(parser))
+        const gltf = await new Promise((resolve, reject) => {
+          loader.load('/.dsh-voice-call/vrm', resolve, undefined, reject)
+        })
+        const vrm = gltf.userData.vrm
+        if (vrm === undefined) throw new Error('the file loaded but carries no VRM data')
+        // three-vrm asks for this before the model is added to a scene.
+        if (typeof VRMUtils.removeUnnecessaryVertices === 'function') VRMUtils.removeUnnecessaryVertices(gltf.scene)
+        if (typeof VRMUtils.combineSkeletons === 'function') VRMUtils.combineSkeletons(gltf.scene)
+        // VRM 0.x models face -Z; turn them to face the camera.
+        vrm.scene.rotation.y = Math.PI
+        scene.add(vrm.scene)
+
+        const expression = vrm.expressionManager
+        const blinkNames = ['blink', 'blinkLeft', 'blinkRight']
+        const mouthNames = ['aa', 'ih', 'ou', 'ee', 'oh']
+        /** Whether a named expression exists on this model. */
+        const has = (name) => expression !== undefined && expression.getExpression(name) !== undefined
+        let blinkPhase = 0
+        let blinkAt = 0
+        return {
+          /** The expressions this model actually offers, for diagnostics. */
+          get capabilities() {
+            return {
+              blink: blinkNames.filter(has),
+              mouth: mouthNames.filter(has),
+              hasExpressions: expression !== undefined,
+            }
+          },
+          /**
+           * Draw one frame.
+           * @param options - mouth opening 0..1, blink 0..1, and a sway in radians.
+           */
+          draw(options) {
+            const ratio = Math.min(window.devicePixelRatio || 1, 2)
+            const width = Math.max(1, Math.round(canvas.clientWidth))
+            const height = Math.max(1, Math.round(canvas.clientHeight))
+            renderer.setPixelRatio(ratio)
+            renderer.setSize(width, height, false)
+            camera.aspect = width / Math.max(1, height)
+            camera.updateProjectionMatrix()
+            if (expression !== undefined) {
+              // The mouth follows the loudness on the "aa" shape. A real viseme
+              // sequence needs the spoken text; this is the honest approximation
+              // available from audio alone, and it is far better than bending
+              // pixels because the model's own mouth geometry does the work.
+              const open = Math.max(0, Math.min(1, options.mouth ?? 0))
+              if (has('aa')) expression.setValue('aa', open * 0.85)
+              if (has('ih')) expression.setValue('ih', open * 0.15)
+              const blink = Math.max(0, Math.min(1, options.blink ?? 0))
+              if (has('blink')) expression.setValue('blink', blink)
+              else {
+                if (has('blinkLeft')) expression.setValue('blinkLeft', blink)
+                if (has('blinkRight')) expression.setValue('blinkRight', blink)
+              }
+            }
+            // A slight turn and nod, so the figure is not a statue.
+            const sway = options.sway ?? 0
+            vrm.scene.rotation.y = Math.PI + sway * 0.35
+            vrm.scene.rotation.x = Math.sin(sway * 1.7) * 0.04
+            vrm.update(1 / 60)
+            renderer.render(scene, camera)
+          },
+          /** Release every GPU object and the model's textures. */
+          dispose() {
+            scene.traverse((node) => {
+              if (node.geometry !== undefined) node.geometry.dispose()
+              const material = node.material
+              if (material === undefined) return
+              for (const item of Array.isArray(material) ? material : [material]) {
+                if (item.map !== undefined && item.map !== null) item.map.dispose()
+                item.dispose()
+              }
+            })
+            renderer.dispose()
+          },
+        }
+      }
+
       /**
        * Decode one relief payload into typed arrays.
        *
@@ -1636,6 +1820,9 @@
         // A mesh the renderer could not use, so the picture stands instead of a
         // blank canvas. Set when WebGL is missing or the shader will not build.
         const [reliefBroken, setReliefBroken] = useState(false)
+        // Whether a rigged VRM model is available. It replaces the photo relief
+        // when present, because it can actually speak.
+        const [vrmSet, setVrmSet] = useState(false)
         const phase = state.phase
         useEffect(() => {
           if (phase === 'idle') return undefined
@@ -1650,6 +1837,20 @@
               if (type === null || type === 'none') { setAvatar({ set: false, src: '' }); return }
               setAvatar({ set: true, src: `/.dsh-voice-call/call-avatar?rev=${String(Date.now())}` })
             } catch { /* no picture is the same as an unreadable one */ }
+          })()
+          return () => { live = false }
+        }, [phase])
+        // A VRM is a few megabytes, so only its presence is checked here; the
+        // figure loader fetches the model itself when it renders.
+        useEffect(() => {
+          if (phase === 'idle') return undefined
+          let live = true
+          void (async () => {
+            try {
+              const response = await fetch('/.dsh-voice-call/vrm', { method: 'HEAD' })
+              if (!live || !response.ok) return
+              setVrmSet(response.headers.get('x-vrm') === 'model/gltf-binary')
+            } catch { /* no model is the same as an unreadable one */ }
           })()
           return () => { live = false }
         }, [phase])
@@ -1701,6 +1902,8 @@
               // The mesh, unless the renderer already failed on this call -- in
               // which case the picture stands rather than a blank canvas.
               relief: reliefBroken ? null : relief,
+              // A rigged model wins over the photo relief.
+              vrm: vrmSet,
               // The same loudness the meter shows, which is what makes the
               // mouth match the sound the user actually hears.
               level: state.level,
@@ -1800,6 +2003,8 @@
           /** Whether the figure has its own picture rather than borrowing the avatar. */
           figureOwn: false,
           figureRev: 0,
+          /** Whether a rigged VRM model is stored; it supersedes the picture. */
+          vrmSet: false,
         })
         const write = async (patch) => {
           store.set({ saving: true, notice: null })
@@ -1831,6 +2036,7 @@
               cloudVoices: body.cloudVoices ?? [],
               avatarSet: await readAvatarState(),
               ...(await readFigureState()),
+              ...(await readVrmState()),
               ...body.settings,
             })
           } catch (error) {
@@ -1950,6 +2156,47 @@
           }
         }
         /** Remove the figure picture, so the avatar stands in again. */
+        /** Read whether a VRM model is stored. */
+        const readVrmState = async () => {
+          try {
+            const response = await fetch('/.dsh-voice-call/vrm', { method: 'HEAD' })
+            if (!response.ok) return { vrmSet: false }
+            return { vrmSet: response.headers.get('x-vrm') === 'model/gltf-binary' }
+          } catch {
+            return { vrmSet: false }
+          }
+        }
+        /**
+         * Upload a VRM model as the call's figure.
+         * @param file - the chosen .vrm file.
+         */
+        const uploadVrm = async (file) => {
+          store.set({ saving: true, notice: null })
+          try {
+            const response = await fetch('/.dsh-voice-call/vrm', {
+              method: 'POST',
+              headers: { 'content-type': 'model/gltf-binary' },
+              body: await file.arrayBuffer(),
+            })
+            if (!response.ok) {
+              const body = await response.json().catch(() => null)
+              throw new Error(body?.error ?? `HTTP ${String(response.status)}`)
+            }
+            store.set({ saving: false, ...(await readVrmState()), notice: { key: 'settings.vrmOk' } })
+          } catch (error) {
+            store.set({ saving: false, notice: { key: 'settings.vrmFailed', params: { message: String(error?.message ?? error) } } })
+          }
+        }
+        /** Remove the VRM model, so the picture stands in again. */
+        const clearVrm = async () => {
+          store.set({ saving: true, notice: null })
+          try {
+            await fetch('/.dsh-voice-call/vrm', { method: 'DELETE' })
+            store.set({ saving: false, ...(await readVrmState()), notice: { key: 'settings.vrmCleared' } })
+          } catch (error) {
+            store.set({ saving: false, notice: { key: 'settings.vrmFailed', params: { message: String(error?.message ?? error) } } })
+          }
+        }
         const clearFigure = async () => {
           store.set({ saving: true, notice: null })
           try {
@@ -1969,7 +2216,7 @@
             store.set({ saving: false, notice: { key: 'settings.avatarFailed', params: { message: String(error?.message ?? error) } } })
           }
         }
-        return { store, load, write, clone, removeVoice, uploadAvatar, clearAvatar, uploadFigure, clearFigure }
+        return { store, load, write, clone, removeVoice, uploadAvatar, clearAvatar, uploadFigure, clearFigure, uploadVrm, clearVrm }
       }
 
       /**
@@ -2156,12 +2403,14 @@
         const [file, setFile] = useState(null)
         const [image, setImage] = useState(null)
         const [figure, setFigure] = useState(null)
+        const [vrm, setVrm] = useState(null)
         useEffect(() => { void settings.load() }, [settings])
         // The characters block is its own controller, so it loads itself.
         useEffect(() => { void characters.read() }, [characters])
         const pick = (event) => { setFile(event.target.files?.[0] ?? null) }
         const pickImage = (event) => { setImage(event.target.files?.[0] ?? null) }
         const pickFigure = (event) => { setFigure(event.target.files?.[0] ?? null) }
+        const pickVrm = (event) => { setVrm(event.target.files?.[0] ?? null) }
         const local = state.voices.filter((voice) => voice.engine === 'piper')
         const clones = state.voices.filter((voice) => voice.engine === 'clone')
         const selected = state.cloneId !== '' ? state.cloneId : state.localVoiceId
@@ -2271,6 +2520,30 @@
                     onClick: () => { void settings.clearAvatar() },
                   }, t('settings.avatarClear'))
                 : null)),
+          // A rigged VRM model. When one is present it replaces the photo
+          // relief entirely: it has a skeleton and blend shapes, so its mouth
+          // shapes vowels and its eyes blink by their own geometry.
+          h('section', { className: 'dvc-set-block' },
+            h('span', { className: 'dvc-set-label' }, t('settings.vrm')),
+            h('p', { className: 'dvc-set-note' }, t('settings.vrmHint')),
+            h('div', { className: 'dvc-set-row' },
+              h('label', { className: 'dvc-set-file' },
+                h('input', { type: 'file', accept: '.vrm,model/gltf-binary', onChange: pickVrm }),
+                vrm === null ? t('settings.vrmChoose') : vrm.name),
+              h('button', {
+                type: 'button', className: 'dvc-set-primary',
+                disabled: vrm === null || state.saving,
+                onClick: () => { if (vrm !== null) void settings.uploadVrm(vrm) },
+              }, state.saving ? t('settings.vrmWorking') : t('settings.vrmUpload')),
+              state.vrmSet
+                ? h('button', {
+                    type: 'button', className: 'dvc-set-quiet',
+                    disabled: state.saving,
+                    onClick: () => { void settings.clearVrm() },
+                  }, t('settings.vrmClear'))
+                : null),
+            h('p', { className: 'dvc-set-note' },
+              state.vrmSet ? t('settings.vrmInUse') : t('settings.vrmNone'))),
           // The 3D figure's own picture. Separate from the avatar above because
           // the two want different crops: a thumbnail reads at 88px, while the
           // figure needs the face filling the frame to have anything to animate.

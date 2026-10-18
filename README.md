@@ -230,6 +230,28 @@ sentence.
 The **cloud-fallback switch stays deployment-wide**. It describes whether audio
 may leave this machine at all, which is not a property of who is speaking.
 
+## A rigged 3D character (VRM)
+
+Upload a **.vrm** model and the call renders it as a real 3D character. A VRM
+carries its own skeleton, humanoid bone map, and face blend shapes, so the figure
+can genuinely speak: its mouth shapes the five vowels and its eyes blink by their
+own geometry. That is a different thing from the photo relief, which can only
+stretch a region of a picture.
+
+A model **replaces** the photo figure when one is present. The photo relief
+remains as the fallback for a deployment that has no model, because a VRM has to
+come from somewhere: single-image reconstruction cannot produce a rigged
+character with blend shapes, so a model is either made by hand or downloaded
+(VRoid Hub and similar sites publish free ones).
+
+The 3D runtime is shipped with the plugin under `vendor/` and served from
+`/.dsh-voice-call/vendor/`, because the shell's shared module table carries no 3D
+library. three.js, the glTF loader, and three-vrm come to about 630 KB compressed
+and are only downloaded when a model is actually in use.
+
+Verified against a real 10.3 MB VRM: it parses, exposes 18 expressions including
+all five vowels and `blink`, and reports 54 humanoid bones.
+
 ## The 3D figure
 
 An uploaded picture can become a **relief** that the call animates, instead of a

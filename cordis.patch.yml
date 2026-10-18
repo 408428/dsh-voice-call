@@ -136,10 +136,6 @@
         # The 3D figure's own picture, separate from the avatar; empty selects
         # ~/.dsh/voice-call/figure.img and falls back to the avatar.
         figureFile: ''
-        # A VRM model to render as the call's figure. A VRM carries a skeleton and
-        # face shapes, so it can actually speak; when present it replaces the
-        # photo relief entirely.
-        vrmFile: ''
         # Animate the figure's mouth from the picture with LivePortrait. This is
         # the only option that is both the person in the photograph and not a
         # stretched image, so it is on. It falls back cleanly when its environment
@@ -148,7 +144,6 @@
         portraitPython: ''
         portraitRoot: ''
         portraitTimeoutMs: 60000
-        maxVrmBytes: 67108864
         reliefGrid: 160
         reliefDepth: 0.22
         depthModel: ''

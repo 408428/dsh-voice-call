@@ -108,18 +108,7 @@ export const Config = z.object({
   characterDir: z.string().default(''),
   /** The picture the 3D figure is built from; empty selects the default. */
   figureFile: z.string().default(''),
-  /**
-   * A VRM model to render as the call's figure.
-   *
-   * A VRM carries its own skeleton and blend shapes, so it can actually speak:
-   * the mouth follows the audio through its viseme shapes and the eyes blink
-   * through its own morph targets. That is a different thing from the photo
-   * relief, which can only bend pixels. When a model is present it wins; the
-   * relief stands in when none is uploaded.
-   */
-  vrmFile: z.string().default(''),
-  /** Largest accepted VRM upload, in bytes. A VRM with textures is often 10-40 MB. */
-  maxVrmBytes: z.natural().min(1024).default(64 * 1024 * 1024),
+
   /**
    * Whether the figure's mouth is animated from a photograph, using
    * LivePortrait. Off leaves the photo relief, which stretches pixels.
@@ -1024,7 +1013,7 @@ function localPaths(config) {
     // avatar is a small round thumbnail, the figure wants a face-filling crop,
     // and forcing one image to be both is why they could not be chosen apart.
     figure: config.figureFile || join(root, 'figure.img'),
-    vrm: config.vrmFile || join(root, 'figure.vrm'),
+
     worker: join(PLUGIN_DIR, 'piper_worker.py'),
     cloneWorker: join(PLUGIN_DIR, 'xtts_worker.py'),
     // The depth model that turns a picture into a relief mesh. Beside the
@@ -2292,31 +2281,6 @@ export function apply(ctx, config) {
           json(res, 200, { activeCharacter: character.id, voice: voice.label })
           return
         }
-        if (route.startsWith(`${ROUTE_PREFIX}/vendor/`) && req.method === 'GET') {
-          // The 3D runtime, served from the plugin's own directory. The shared
-          // module table has no 3D library, so a VRM-capable client needs these
-          // files from somewhere; shipping them here keeps the version pinned to
-          // the plugin rather than to whatever the shell happens to carry.
-          const name = route.slice(`${ROUTE_PREFIX}/vendor/`.length)
-          if (!/^[A-Za-z0-9.-]+\.js$/.test(name) || name.includes('..')) {
-            throw new RequestError('Unknown asset', 404)
-          }
-          let bytes
-          try {
-            bytes = await readFile(join(PLUGIN_DIR, 'vendor', name))
-          } catch {
-            throw new RequestError('Unknown asset', 404)
-          }
-          res.writeHead(200, {
-            'content-type': 'text/javascript; charset=utf-8',
-            // Immutable: the filename carries no version, so the plugin's own
-            // release is what invalidates it.
-            'cache-control': 'public, max-age=86400',
-            'content-length': bytes.length,
-          })
-          res.end(bytes)
-          return
-        }
         if (route === `${ROUTE_PREFIX}/portrait/frame` && req.method === 'POST') {
           // One animated frame, for a given mouth opening.
           //
@@ -2366,59 +2330,6 @@ export function apply(ctx, config) {
             'x-portrait-reason': !enabled ? 'disabled' : stored === undefined ? 'no-picture' : 'ready',
           })
           res.end()
-          return
-        }
-        if (route === `${ROUTE_PREFIX}/vrm` && (req.method === 'GET' || req.method === 'HEAD')) {
-          // The rigged model, served as bytes: a VRM is a glTF binary with its
-          // own skeleton and blend shapes, so the browser needs the whole file
-          // rather than a rendered image.
-          const path = localPaths(config).vrm
-          let bytes
-          try {
-            bytes = await readFile(path)
-          } catch {
-            bytes = undefined
-          }
-          if (bytes === undefined || bytes.length === 0) {
-            if (req.method === 'HEAD') { res.writeHead(200, { 'x-vrm': 'none' }); res.end(); return }
-            json(res, 200, { vrm: null }, { 'cache-control': 'no-store' })
-            return
-          }
-          if (req.method === 'HEAD') {
-            res.writeHead(200, { 'x-vrm': 'model/gltf-binary', 'x-vrm-bytes': String(bytes.length) })
-            res.end()
-            return
-          }
-          res.writeHead(200, {
-            'content-type': 'model/gltf-binary',
-            'cache-control': 'no-store',
-            'content-length': bytes.length,
-          })
-          res.end(bytes)
-          return
-        }
-        if (route === `${ROUTE_PREFIX}/vrm` && req.method === 'POST') {
-          // A VRM is a binary glTF: the first four bytes are the magic, and the
-          // version follows. Checking them keeps a stray image from being stored
-          // as a model and failing later in the browser with no explanation.
-          const bytes = await readBody(req, config.maxVrmBytes)
-          if (bytes.length < 12) throw new RequestError('No model was sent', 400)
-          const magic = bytes.toString('ascii', 0, 4)
-          if (magic !== 'glTF') {
-            throw new RequestError('That file is not a VRM or glTF binary. Export it as .vrm.', 400)
-          }
-          const path = localPaths(config).vrm
-          await mkdir(dirname(path), { recursive: true })
-          await writeFile(path, bytes)
-          // A new model replaces whatever the call was showing.
-          reliefCache.key = ''
-          ctx.logger.info(`voice-call stored a VRM model (${String(bytes.length)} bytes)`)
-          json(res, 201, { vrm: { bytes: bytes.length } })
-          return
-        }
-        if (route === `${ROUTE_PREFIX}/vrm` && req.method === 'DELETE') {
-          await rm(localPaths(config).vrm, { force: true })
-          json(res, 200, { vrm: null })
           return
         }
         if (route === `${ROUTE_PREFIX}/figure` && (req.method === 'GET' || req.method === 'HEAD')) {

@@ -1294,24 +1294,34 @@
         }, [props.relief, activity, level])
 
         const hasRelief = props.relief !== null && props.relief !== undefined
+        // The figure is only worth showing once the call is live: while it is
+        // still ringing, the round thumbnail is the right size for a face at a
+        // glance, and a tall portrait panel would take over the screen before
+        // there is anything to watch.
+        const showFigure = hasRelief && props.live === true
+        const fallback = props.avatar === true
+          ? h('img', { className: 'dvc-avatar dvc-avatar-img', src: props.avatarSrc, alt: '' })
+          : h('span', {
+              className: 'dvc-avatar',
+              style: { background: `linear-gradient(150deg, hsl(${hue} 72% 58%), hsl(${(hue + 42) % 360} 68% 42%))` },
+            }, initialOf(props.title))
+        if (showFigure) {
+          // A portrait panel rather than a circle: the relief has a face and
+          // shoulders, and a circle crops them into a dot. The canvas keeps a
+          // 3:4 box and the renderer measures it on every frame, so it draws at
+          // whatever size this ends up.
+          return h('div', { className: 'dvc-figure-wrap' },
+            h('canvas', {
+              ref: canvasRef,
+              className: 'dvc-figure',
+              'aria-label': props.title ?? '',
+            }),
+            h('span', { className: 'dvc-figure-ring', 'data-active': activity === 'speaking' ? 'true' : undefined }))
+        }
         return h('div', { className: 'dvc-avatar-wrap' },
           h('span', { className: 'dvc-ring', 'data-active': activity === 'speaking' ? 'true' : undefined }),
           h('span', { className: 'dvc-ring dvc-ring-late', 'data-active': activity === 'speaking' ? 'true' : undefined }),
-          // The 3D figure when the Host could build one, otherwise the picture,
-          // otherwise the session's own colour and initial -- so a call always
-          // has a face.
-          hasRelief
-            ? h('canvas', {
-                ref: canvasRef,
-                className: 'dvc-avatar dvc-avatar-3d',
-                'aria-label': props.title ?? '',
-              })
-            : props.avatar === true
-              ? h('img', { className: 'dvc-avatar dvc-avatar-img', src: props.avatarSrc, alt: '' })
-              : h('span', {
-                  className: 'dvc-avatar',
-                  style: { background: `linear-gradient(150deg, hsl(${hue} 72% 58%), hsl(${(hue + 42) % 360} 68% 42%))` },
-                }, initialOf(props.title)),
+          fallback,
         )
       }
 
@@ -1687,12 +1697,16 @@
             h('div', { className: 'dvc-phase' }, t(`phase.${state.phase}`)),
             h(Avatar, {
               title: state.title, sessionId: state.sessionId, activity: state.activity,
-              avatar: avatar.set, avatarSrc: avatar.src, relief,
+              avatar: avatar.set, avatarSrc: avatar.src,
+              // The mesh, unless the renderer already failed on this call -- in
+              // which case the picture stands rather than a blank canvas.
+              relief: reliefBroken ? null : relief,
               // The same loudness the meter shows, which is what makes the
               // mouth match the sound the user actually hears.
               level: state.level,
-              // The figure is only used when it can actually be drawn.
-              relief: reliefBroken ? null : relief,
+              // The figure takes over from the round thumbnail once the call is
+              // live: before that there is nothing to watch.
+              live: state.phase === 'active',
               onReliefFailed: () => { setReliefBroken(true) },
             }),
             h('div', { className: 'dvc-title' }, state.title || state.sessionId),
@@ -2734,7 +2748,12 @@
 .dvc-avatar-wrap{position:relative;display:grid;place-items:center;width:104px;height:104px}
 .dvc-avatar{display:grid;place-items:center;width:88px;height:88px;border-radius:999px;color:var(--dsw-alias-label-primary-inverted);font-size:34px;font-weight:600;box-shadow:var(--dsw-shadow-lv2)}
 .dvc-avatar-img{object-fit:cover;background:var(--dsw-alias-bg-base)}
-.dvc-avatar-3d{display:block;width:88px;height:88px;background:transparent;box-shadow:none}
+.dvc-figure-wrap{position:relative;display:grid;place-items:center;width:100%;margin:2px 0 4px}
+/* A portrait box: the relief has a face and shoulders, and a circle crops them
+   into a dot. The canvas fills it and the renderer measures the real size. */
+.dvc-figure{display:block;width:100%;height:min(42vh,272px);border-radius:16px;background:var(--dsw-alias-bg-base);box-shadow:var(--dsw-elevation-prominent)}
+.dvc-figure-ring{position:absolute;inset:-2px;border-radius:18px;border:2px solid transparent;pointer-events:none;transition:border-color .2s}
+.dvc-figure-ring[data-active='true']{border-color:var(--dsw-alias-brand-primary)}
 .dvc-ring{position:absolute;inset:0;border-radius:999px;border:2px solid var(--dsw-alias-brand-primary);opacity:0;transform:scale(.86)}
 .dvc-ring[data-active]{animation:dvc-pulse 1.6s ease-out infinite}
 .dvc-ring-late[data-active]{animation-delay:.8s}
@@ -2823,7 +2842,10 @@
         }, VoiceSettingsSection))
       }
 
-      return { name: 'voice-call', inject, apply }
+      // Exposed for tests: the figure's own rendering is worth checking without
+      // standing up the overlay, its session store, and its audio pipeline.
+      const internals = { Avatar, createReliefRenderer, decodeReliefField, FaceCalibration }
+      return { name: 'voice-call', inject, apply, internals }
     },
   })
 })()

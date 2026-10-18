@@ -2684,6 +2684,17 @@
 .dvc-set-quiet{padding:6px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;cursor:pointer}
 .dvc-set-quiet:hover{color:var(--dsw-alias-label-primary)}
 .dvc-set-error{margin:0;color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:1.6}
+
+.dvc-calibrate{display:flex;flex-direction:column;gap:10px}
+.dvc-calibrate-stage{display:flex;justify-content:center}
+.dvc-calibrate-area{position:relative;width:100%;max-width:260px;line-height:0;touch-action:none}
+.dvc-calibrate-img{width:100%;height:auto;border-radius:10px;display:block}
+.dvc-mark{position:absolute;border:2px solid;border-radius:6px;cursor:grab;box-sizing:border-box;min-width:14px;min-height:14px}
+/* A band a few pixels tall is not a finger target, so the grab area is padded
+   beyond the visible border without moving it. */
+.dvc-mark::before{content:'';position:absolute;inset:-14px;border-radius:10px}
+.dvc-mark:active{cursor:grabbing}
+.dvc-mark-label{position:absolute;left:0;top:-9px;padding:1px 5px;border-radius:5px;color:#fff;font-size:10px;line-height:1.5;white-space:nowrap;opacity:.9}
 `
 
       /** Handset glyph. */
@@ -2724,13 +2735,6 @@
 .dvc-avatar{display:grid;place-items:center;width:88px;height:88px;border-radius:999px;color:var(--dsw-alias-label-primary-inverted);font-size:34px;font-weight:600;box-shadow:var(--dsw-shadow-lv2)}
 .dvc-avatar-img{object-fit:cover;background:var(--dsw-alias-bg-base)}
 .dvc-avatar-3d{display:block;width:88px;height:88px;background:transparent;box-shadow:none}
-.dvc-calibrate{display:flex;flex-direction:column;gap:10px}
-.dvc-calibrate-stage{display:flex;justify-content:center}
-.dvc-calibrate-area{position:relative;width:100%;max-width:260px;line-height:0;touch-action:none}
-.dvc-calibrate-img{width:100%;height:auto;border-radius:10px;display:block}
-.dvc-mark{position:absolute;border:2px solid;border-radius:6px;cursor:grab;box-sizing:border-box;min-width:10px;min-height:8px}
-.dvc-mark:active{cursor:grabbing}
-.dvc-mark-label{position:absolute;left:0;top:-9px;padding:1px 5px;border-radius:5px;color:#fff;font-size:10px;line-height:1.5;white-space:nowrap;opacity:.9}
 .dvc-ring{position:absolute;inset:0;border-radius:999px;border:2px solid var(--dsw-alias-brand-primary);opacity:0;transform:scale(.86)}
 .dvc-ring[data-active]{animation:dvc-pulse 1.6s ease-out infinite}
 .dvc-ring-late[data-active]{animation-delay:.8s}

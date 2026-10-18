@@ -2355,9 +2355,9 @@ export function apply(ctx, config) {
             throw new RequestError('A calibration needs mouth, leftEye, and rightEye boxes', 400)
           }
           await ensureVoice()
-          await refreshCharacter()
-          const fromCharacter = character.record === null ? undefined : await readCharacterAvatar(config, character.id)
-          const stored = fromCharacter ?? await readAvatar(config)
+          // The FIGURE picture, the same one the mesh is built from: keying the
+          // marks to a different image would write them where nothing reads.
+          const stored = await readFigure(config)
           if (stored === undefined) throw new RequestError('There is no picture to calibrate', 400)
           const key = createHash('sha256').update(stored.bytes).digest('hex').slice(0, 24)
           await saveCalibration(ctx, config, key, {
@@ -2372,9 +2372,7 @@ export function apply(ctx, config) {
         if (route === `${ROUTE_PREFIX}/calibration` && req.method === 'DELETE') {
           // Forget the marks, so the automatic guess applies again.
           await ensureVoice()
-          await refreshCharacter()
-          const fromCharacter = character.record === null ? undefined : await readCharacterAvatar(config, character.id)
-          const stored = fromCharacter ?? await readAvatar(config)
+          const stored = await readFigure(config)
           if (stored === undefined) throw new RequestError('There is no picture to calibrate', 400)
           const key = createHash('sha256').update(stored.bytes).digest('hex').slice(0, 24)
           await rm(calibrationPath(config, key), { force: true })

@@ -238,7 +238,10 @@ can genuinely speak: its mouth shapes the five vowels and its eyes blink by thei
 own geometry. That is a different thing from the photo relief, which can only
 stretch a region of a picture.
 
-A model **replaces** the photo figure when one is present. The photo relief
+A model **replaces** the photo figure when one is present. The install ships
+with **Alicia Solid**, the VRM Consortium's official sample character (7.5 MB,
+55 bones, 17 expressions including all five vowels and `blink`), so a call shows
+a real 3D character without anything being downloaded first. The photo relief
 remains as the fallback for a deployment that has no model, because a VRM has to
 come from somewhere: single-image reconstruction cannot produce a rigged
 character with blend shapes, so a model is either made by hand or downloaded

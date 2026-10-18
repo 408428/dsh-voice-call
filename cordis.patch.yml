@@ -140,6 +140,13 @@
         # face shapes, so it can actually speak; when present it replaces the
         # photo relief entirely.
         vrmFile: ''
+        # Animate the figure's mouth from the picture with LivePortrait. Off
+        # leaves the photo relief, which stretches pixels instead of rebuilding
+        # the face. Needs its own Python environment: LivePortrait pins numpy 1.x.
+        portrait: false
+        portraitPython: ''
+        portraitRoot: ''
+        portraitTimeoutMs: 60000
         maxVrmBytes: 67108864
         reliefGrid: 160
         reliefDepth: 0.22

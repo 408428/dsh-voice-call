@@ -17,6 +17,7 @@
     "vendor/*.js",
     "piper_worker.py",
     "relief_worker.py",
+    "lp_worker.py",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",

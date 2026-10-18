@@ -121,6 +121,17 @@ export const Config = z.object({
   /** Largest accepted VRM upload, in bytes. A VRM with textures is often 10-40 MB. */
   maxVrmBytes: z.natural().min(1024).default(64 * 1024 * 1024),
   /**
+   * Whether the figure's mouth is animated from a photograph, using
+   * LivePortrait. Off leaves the photo relief, which stretches pixels.
+   */
+  portrait: z.boolean().default(false).volatile(),
+  /** The Python that has LivePortrait's dependencies; empty selects the default. */
+  portraitPython: z.string().default(''),
+  /** The LivePortrait checkout, which supplies its `src` package and weights. */
+  portraitRoot: z.string().default(''),
+  /** How long one frame may take before it is abandoned. */
+  portraitTimeoutMs: z.natural().min(1000).default(60_000),
+  /**
    * Whether an uploaded picture is also turned into a 3D relief for the call
    * screen. Off leaves calls on the flat picture, which needs no depth model.
    */
@@ -1021,6 +1032,12 @@ function localPaths(config) {
     // read from disk on every call.
     depthModel: config.depthModel || join(root, 'models', 'depth-anything-v2-small.onnx'),
     reliefWorker: join(PLUGIN_DIR, 'relief_worker.py'),
+    // The mouth animator, the LivePortrait checkout it imports, and the
+    // interpreter that has its dependencies. That interpreter is separate
+    // because LivePortrait pins numpy 1.x and the speech stack needs 2.x.
+    portraitWorker: join(PLUGIN_DIR, 'lp_worker.py'),
+    portraitRoot: config.portraitRoot || join(root, 'liveportrait'),
+    portraitPython: config.portraitPython || join(root, 'lp-venv', 'bin', 'python'),
   }
 }
 
@@ -1160,7 +1177,10 @@ class LocalEngine {
   async start() {
     if (this.child !== undefined) return this.child
     const paths = localPaths(this.config)
-    const child = spawn(paths.python, [this.options.worker, ...this.options.args], {
+    // An engine may name its own interpreter: LivePortrait pins numpy 1.x, which
+    // the speech stack cannot share, so the two cannot run in one environment.
+    const python = this.options.python ?? paths.python
+    const child = spawn(python, [this.options.worker, ...this.options.args], {
       stdio: ['pipe', 'pipe', 'pipe'],
     })
     this.child = child
@@ -1267,15 +1287,16 @@ class LocalEngine {
    * @param body - the request fields, without the id.
    * @returns the reply, whose shape depends on the worker.
    */
-  async request(body) {
+  async request(body, timeoutMs) {
     const run = this.queue.then(async () => {
       const child = await this.start()
       const id = String(this.nextId++)
       const settled = Promise.withResolvers()
       this.pending.set(id, settled)
+      const budget = timeoutMs ?? this.options.timeoutMs
       const timer = setTimeout(() => {
         if (this.pending.delete(id)) settled.reject(new Error(`${this.options.label} timed out`))
-      }, this.options.timeoutMs)
+      }, budget)
       child.stdin.write(`${JSON.stringify({ id, ...body })}\n`)
       try {
         return await settled.promise
@@ -1847,6 +1868,13 @@ export function apply(ctx, config) {
    * picture invalidates it.
    */
   const reliefCache = { key: '', mesh: null }
+  /**
+   * Which picture the portrait engine is currently loaded for.
+   *
+   * The engine holds the appearance feature and source keypoints for one face,
+   * so it is only restarted when the picture changes.
+   */
+  const portraitCache = { key: '' }
   const relief = new LocalEngine(ctx, config, {
     label: 'relief engine',
     worker: localPaths(config).reliefWorker,
@@ -1854,7 +1882,22 @@ export function apply(ctx, config) {
     timeoutMs: config.cloneTimeoutMs,
     require: [],
   })
-  ctx.effect(() => () => { piper.dispose(); clone.dispose(); relief.dispose() }, 'voice-call local voices')
+  /**
+   * The mouth animator, which turns the source picture into frames.
+   *
+   * Separate from the relief engine because it loads a different stack entirely:
+   * LivePortrait is a PyTorch pipeline with its own Python environment, and a
+   * call that never shows a face must not pay for loading it.
+   */
+  const portrait = new LocalEngine(ctx, config, {
+    label: 'portrait engine',
+    worker: localPaths(config).portraitWorker,
+    args: [localPaths(config).figure, localPaths(config).portraitRoot],
+    python: localPaths(config).portraitPython,
+    timeoutMs: config.portraitTimeoutMs,
+    require: [],
+  })
+  ctx.effect(() => () => { piper.dispose(); clone.dispose(); relief.dispose(); portrait.dispose() }, 'voice-call local voices')
   /**
    * Cached route ranking. Probing costs a request per provider, so the answer is
    * held for `routeTtlMs` and shared by every call in between.
@@ -2272,6 +2315,57 @@ export function apply(ctx, config) {
             'content-length': bytes.length,
           })
           res.end(bytes)
+          return
+        }
+        if (route === `${ROUTE_PREFIX}/portrait/frame` && req.method === 'POST') {
+          // One animated frame, for a given mouth opening.
+          //
+          // Frames are pulled rather than pushed: the browser asks for the next
+          // one when it is ready, so a slow GPU throttles the animation instead
+          // of building a queue of stale frames.
+          if (!readConfig(config.portrait, false)) {
+            throw new RequestError('The portrait animator is switched off', 409)
+          }
+          const body = await readBody(req, config.maxTextBytes)
+          let wanted
+          try {
+            wanted = JSON.parse(body.toString('utf8'))
+          } catch {
+            throw new RequestError('Expected a JSON object', 400)
+          }
+          const opening = Math.max(0, Math.min(1, Number(wanted?.open ?? 0)))
+          await ensureVoice()
+          const stored = await readFigure(config)
+          if (stored === undefined) throw new RequestError('There is no picture to animate', 400)
+          // The key names the picture, so replacing it restarts the engine with
+          // the new face rather than animating the old one.
+          const key = createHash('sha256').update(stored.bytes).digest('hex').slice(0, 24)
+          if (portraitCache.key !== key) {
+            const image = join(work, 'portrait-source.img')
+            await writeFile(image, stored.bytes)
+            await portrait.use([image, localPaths(config).portraitRoot])
+            portraitCache.key = key
+          }
+          const started = Date.now()
+          const reply = await portrait.request({ open: opening }, config.portraitTimeoutMs)
+          json(res, 200, {
+            frame: reply.jpeg,
+            open: opening,
+            ms: Date.now() - started,
+          }, { 'cache-control': 'no-store' })
+          return
+        }
+        if (route === `${ROUTE_PREFIX}/portrait` && req.method === 'HEAD') {
+          // Whether the animator can run at all, so the call can choose between
+          // a moving mouth and a still picture before it asks for a frame.
+          const enabled = readConfig(config.portrait, false)
+          const stored = await readFigure(config)
+          const available = enabled && stored !== undefined
+          res.writeHead(200, {
+            'x-portrait': available ? 'ready' : 'none',
+            'x-portrait-reason': !enabled ? 'disabled' : stored === undefined ? 'no-picture' : 'ready',
+          })
+          res.end()
           return
         }
         if (route === `${ROUTE_PREFIX}/vrm` && (req.method === 'GET' || req.method === 'HEAD')) {

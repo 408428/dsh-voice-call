@@ -230,6 +230,36 @@ sentence.
 The **cloud-fallback switch stays deployment-wide**. It describes whether audio
 may leave this machine at all, which is not a property of who is speaking.
 
+## A photograph that talks (LivePortrait)
+
+The photograph can be the figure, with its mouth driven by the audio.
+LivePortrait rebuilds each frame from the source picture through implicit
+keypoints, so the person on screen stays the person in the photograph -- which is
+what neither of the other options does: a VRM is smooth but is somebody else, and
+a stretched relief looks wrong.
+
+**Only the mouth moves.** Measured on a real portrait, driving the lip
+retargeting changed 0.15% of the pixels, all of them around the mouth. That is
+the property worth having: a face that talks without twitching.
+
+**It runs at about 14 fps here** (71.7 ms/frame, fp16, RTX 4070 Laptop). The
+generator is 74 ms of that and its output is fixed at 512x512, so it cannot be
+made much cheaper. Two things make that rate usable:
+
+- **Frames are pulled, not pushed.** The browser asks for the next frame when it
+  has painted the last one, so a slow engine throttles the animation instead of
+  building a queue of stale frames.
+- **It only runs while speaking.** Silence costs nothing; the last frame stays
+  on screen.
+
+It needs its own Python environment, because LivePortrait pins numpy 1.x and the
+speech stack needs 2.x. `~/.dsh/voice-call/lp-venv` and
+`~/.dsh/voice-call/liveportrait` (630 MB of source and weights) hold it, and the
+plugin spawns that interpreter for this engine alone.
+
+The honest limit: this is 2D. The face cannot turn away from the camera, and a
+profile view works badly.
+
 ## A rigged 3D character (VRM)
 
 Upload a **.vrm** model and the call renders it as a real 3D character. A VRM

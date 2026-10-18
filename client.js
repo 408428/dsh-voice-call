@@ -1247,6 +1247,10 @@
         // A VRM is a real rigged character, so it wins over the photo relief: it
         // has a mouth that can shape vowels and eyes that blink by their own
         // geometry, rather than a region of a photo being stretched.
+        // A photograph whose mouth moves wins over everything else: it is the
+        // only option that is both the person in the picture AND not a
+        // stretched image.
+        const hasPortrait = props.portrait === true && props.live === true
         const hasVrm = props.vrm === true && props.live === true
         const hasRelief = props.relief !== null && props.relief !== undefined
         const canvasRef = useRef(null)
@@ -1352,7 +1356,7 @@
         // still ringing, the round thumbnail is the right size for a face at a
         // glance, and a tall portrait panel would take over the screen before
         // there is anything to watch.
-        const showFigure = (hasVrm || hasRelief) && props.live === true
+        const showFigure = (hasPortrait || hasVrm || hasRelief) && props.live === true
         const fallback = props.avatar === true
           ? h('img', { className: 'dvc-avatar dvc-avatar-img', src: props.avatarSrc, alt: '' })
           : h('span', {
@@ -1360,6 +1364,12 @@
               style: { background: `linear-gradient(150deg, hsl(${hue} 72% 58%), hsl(${(hue + 42) % 360} 68% 42%))` },
             }, initialOf(props.title))
         if (showFigure) {
+          if (hasPortrait) {
+            // The animator owns the picture; the panel is just a frame around it.
+            return h('div', { className: 'dvc-figure-wrap' },
+              h(PortraitFigure, { activity, level, title: props.title }),
+              h('span', { className: 'dvc-figure-ring', 'data-active': activity === 'speaking' ? 'true' : undefined }))
+          }
           // A portrait panel rather than a circle: the relief has a face and
           // shoulders, and a circle crops them into a dot. The canvas keeps a
           // 3:4 box and the renderer measures it on every frame, so it draws at
@@ -1816,6 +1826,80 @@
         }
       }
 
+
+      /**
+       * A photograph whose mouth moves with the audio.
+       *
+       * LivePortrait rebuilds each frame from the source picture, so the person
+       * on screen stays the person in the photograph. That is the point: a VRM
+       * is smooth but is somebody else, and the photo relief stretches pixels.
+       *
+       * Frames are **pulled**, not pushed: the browser asks for the next frame
+       * when it has painted the last one. A slow GPU therefore throttles the
+       * animation instead of building a queue of stale frames, which is what
+       * makes a 10 fps engine usable at all.
+       *
+       * The engine is only asked to work while the figure is speaking. Silence
+       * costs nothing: the last frame simply stays on screen.
+       *
+       * @param props - the call's phase, activity, level, and title.
+       * @returns The portrait frame, or null while it loads.
+       */
+      function PortraitFigure(props) {
+        const [src, setSrc] = useState('')
+        const [failed, setFailed] = useState(false)
+        const busy = useRef(false)
+        const alive = useRef(true)
+        const levelRef = useRef(0)
+        levelRef.current = props.level ?? 0
+        const speaking = props.activity === 'speaking'
+        const speakingRef = useRef(speaking)
+        speakingRef.current = speaking
+
+        useEffect(() => {
+          alive.current = true
+          const loop = async () => {
+            while (alive.current) {
+              // Nothing to animate while the figure is quiet, so wait rather
+              // than spending the GPU on a still image.
+              if (!speakingRef.current) {
+                await new Promise((r) => setTimeout(r, 120))
+                continue
+              }
+              if (busy.current) { await new Promise((r) => setTimeout(r, 16)); continue }
+              busy.current = true
+              const started = performance.now()
+              try {
+                const response = await fetch('/.dsh-voice-call/portrait/frame', {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify({ open: Math.min(1, Math.max(0, levelRef.current * 5.5)) }),
+                })
+                if (!alive.current) break
+                if (!response.ok) { setFailed(true); break }
+                const body = await response.json()
+                if (body.frame === undefined) { setFailed(true); break }
+                setSrc(`data:image/jpeg;base64,${body.frame}`)
+              } catch {
+                if (alive.current) setFailed(true)
+                break
+              } finally {
+                busy.current = false
+              }
+              // Yield to the browser so the frame paints before the next one is
+              // requested; without this the loop starves the render.
+              await new Promise((r) => setTimeout(r, 8))
+            }
+          }
+          void loop()
+          return () => { alive.current = false }
+        }, [])
+
+        if (failed) return h('img', { className: 'dvc-portrait', src: `/.dsh-voice-call/figure`, alt: props.title ?? '' })
+        if (src === '') return h('div', { className: 'dvc-portrait dvc-portrait-wait' })
+        return h('img', { className: 'dvc-portrait', src, alt: props.title ?? '' })
+      }
+
       /**
        * Decode one relief payload into typed arrays.
        *
@@ -1869,6 +1953,9 @@
         // Whether a rigged VRM model is available. It replaces the photo relief
         // when present, because it can actually speak.
         const [vrmSet, setVrmSet] = useState(false)
+        // Whether the Host can animate the picture's mouth. It is a separate
+        // engine with its own environment, so it is asked rather than assumed.
+        const [portraitSet, setPortraitSet] = useState(false)
         const phase = state.phase
         useEffect(() => {
           if (phase === 'idle') return undefined
@@ -1883,6 +1970,18 @@
               if (type === null || type === 'none') { setAvatar({ set: false, src: '' }); return }
               setAvatar({ set: true, src: `/.dsh-voice-call/call-avatar?rev=${String(Date.now())}` })
             } catch { /* no picture is the same as an unreadable one */ }
+          })()
+          return () => { live = false }
+        }, [phase])
+        useEffect(() => {
+          if (phase === 'idle') return undefined
+          let live = true
+          void (async () => {
+            try {
+              const response = await fetch('/.dsh-voice-call/portrait', { method: 'HEAD' })
+              if (!live || !response.ok) return
+              setPortraitSet(response.headers.get('x-portrait') === 'ready')
+            } catch { /* no animator means the picture stands */ }
           })()
           return () => { live = false }
         }, [phase])
@@ -1948,7 +2047,9 @@
               // The mesh, unless the renderer already failed on this call -- in
               // which case the picture stands rather than a blank canvas.
               relief: reliefBroken ? null : relief,
-              // A rigged model wins over the photo relief.
+              // A photo whose mouth moves wins over a rigged model, which wins
+              // over the stretched relief.
+              portrait: portraitSet,
               vrm: vrmSet,
               // The same loudness the meter shows, which is what makes the
               // mouth match the sound the user actually hears.
@@ -3072,6 +3173,8 @@
    into a dot. The canvas fills it and the renderer measures the real size. */
 .dvc-figure{display:block;width:100%;height:min(42vh,272px);border-radius:16px;background:var(--dsw-alias-bg-base);box-shadow:var(--dsw-elevation-prominent)}
 .dvc-figure-ring{position:absolute;inset:-2px;border-radius:18px;border:2px solid transparent;pointer-events:none;transition:border-color .2s}
+.dvc-portrait{display:block;width:100%;height:min(42vh,272px);object-fit:cover;border-radius:16px;background:var(--dsw-alias-bg-base);box-shadow:var(--dsw-elevation-prominent)}
+.dvc-portrait-wait{background:var(--dsw-alias-bg-base)}
 .dvc-figure-ring[data-active='true']{border-color:var(--dsw-alias-brand-primary)}
 .dvc-ring{position:absolute;inset:0;border-radius:999px;border:2px solid var(--dsw-alias-brand-primary);opacity:0;transform:scale(.86)}
 .dvc-ring[data-active]{animation:dvc-pulse 1.6s ease-out infinite}

@@ -1693,8 +1693,11 @@
         // Framed head-and-shoulders. A full-body view makes a VRM read as a game
         // avatar standing in a room; a call is a conversation, so the face should
         // fill the panel.
-        camera.position.set(0, 1.42, 0.92)
-        camera.lookAt(0, 1.40, 0)
+        // Aimed BELOW the head, so the head sits above the middle of the panel:
+        // the head is at y≈1.33 and looking straight at it put it in the lower
+        // half, showing more chest than face.
+        camera.position.set(0, 1.36, 0.92)
+        camera.lookAt(0, 1.26, 0)
         scene.add(new THREE.AmbientLight(0xffffff, 1.6))
         const key = new THREE.DirectionalLight(0xffffff, 1.4)
         key.position.set(0.6, 2.2, 1.6)
@@ -1713,8 +1716,11 @@
         // three-vrm asks for this before the model is added to a scene.
         if (typeof VRMUtils.removeUnnecessaryVertices === 'function') VRMUtils.removeUnnecessaryVertices(gltf.scene)
         if (typeof VRMUtils.combineSkeletons === 'function') VRMUtils.combineSkeletons(gltf.scene)
-        // VRM 0.x models face -Z; turn them to face the camera.
-        vrm.scene.rotation.y = Math.PI
+        // The camera sits at +Z looking towards the origin, and a VRM's forward
+        // vector is +Z once three-vrm has normalised the model -- measured on
+        // both a VRM 0.x and a VRM 1.0 sample. So the model already faces the
+        // camera and must NOT be turned; rotating it by PI shows its back, which
+        // is exactly what happened.
         scene.add(vrm.scene)
 
         // Lower the arms. A VRM is authored in T-pose -- arms straight out --
@@ -1805,7 +1811,7 @@
             }
             // A slight turn and nod, so the figure is not a statue.
             const sway = options.sway ?? 0
-            vrm.scene.rotation.y = Math.PI + sway * 0.35
+            vrm.scene.rotation.y = sway * 0.35
             vrm.scene.rotation.x = Math.sin(sway * 1.7) * 0.04
             vrm.update(1 / 60)
             renderer.render(scene, camera)

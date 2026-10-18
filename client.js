@@ -514,6 +514,11 @@
           active.start()
         }
 
+        /** A smoothed envelope of the input level, for the mouth. */
+        let smoothedLevel = 0
+        /** A slow-decaying peak, so the mouth opening adapts to this microphone. */
+        let peak = 0
+
         /** One analyser tick: measure, calibrate, and drive the segment state machine. */
         function tick() {
           if (stopped || !analyser) return
@@ -522,6 +527,21 @@
           for (const sample of samples) sum += sample * sample
           const level = Math.sqrt(sum / samples.length)
           handlers.onLevel(level)
+          // The mouth follows a smoothed envelope, not the raw RMS: the raw
+          // number jumps within a single syllable, and a mouth driven by it
+          // vibrates instead of opening. An asymmetric average rises quickly
+          // (so a syllable starts promptly) and falls slowly (so it does not
+          // snap shut between syllables).
+          smoothedLevel = level > smoothedLevel
+            ? smoothedLevel + (level - smoothedLevel) * 0.5
+            : smoothedLevel + (level - smoothedLevel) * 0.12
+          // Track a slow-decaying peak, so the mapping adapts to this speaker's
+          // microphone rather than to a number chosen on one machine.
+          peak = Math.max(smoothedLevel, peak * 0.995)
+          const fraction = peak > 0.01 ? smoothedLevel / peak : 0
+          // A quarter to a half of the mouth's range is the useful part: past
+          // that the mouth is already open and further travel only looks odd.
+          handlers.onMouth?.(Math.min(0.55, Math.max(0, fraction * 0.55)))
           if (Date.now() < calibrationEnd) {
             calibrationLevels.push(level)
             return
@@ -911,6 +931,9 @@
           const run = ++generation
           capture = createCapture({
             onLevel: (level) => { store.set({ level }) },
+            // A separate channel for the mouth, so the meter stays responsive
+            // while the mouth moves smoothly.
+            onMouth: (mouth) => { store.set({ mouth }) },
             onUtterance,
             onSilent: () => { store.set({ notice: { key: 'notice.silentMic' } }) },
             onDevice: (label) => { store.set({ device: label }) },
@@ -1151,7 +1174,7 @@
             if (store.getSnapshot().phase !== 'idle') return
             const run = ++generation
             store.set({ phase: 'calling', sessionId: null, title: t('call.newTitle'), lines: [], notice: null,
-              activity: 'idle', elapsed: 0, level: 0, muted: false, device: '', route: null, preset: null, startedAt: Date.now() })
+              activity: 'idle', elapsed: 0, level: 0, mouth: 0, muted: false, device: '', route: null, preset: null, startedAt: Date.now() })
             lifetime = new AbortController()
             ready = deferred()
             try {
@@ -1181,7 +1204,7 @@
             generation += 1
             store.set({
               phase: 'incoming', sessionId, title, lines: [], notice: null, activity: 'idle',
-              elapsed: 0, level: 0, muted: false, device: '', startedAt: Date.now(),
+              elapsed: 0, level: 0, mouth: 0, muted: false, device: '', startedAt: Date.now(),
             })
           },
           /** Answer the ringing call. */
@@ -1206,7 +1229,7 @@
             void releasing?.stop()
             store.set({
               phase: 'idle', sessionId: null, title: '', lines: [], notice: null,
-              activity: 'idle', elapsed: 0, level: 0, muted: false, device: '',
+              activity: 'idle', elapsed: 0, level: 0, mouth: 0, muted: false, device: '',
             })
           },
           /** Toggle microphone capture without dropping the call. */
@@ -1367,7 +1390,7 @@
           if (hasPortrait) {
             // The animator owns the picture; the panel is just a frame around it.
             return h('div', { className: 'dvc-figure-wrap' },
-              h(PortraitFigure, { activity, level, title: props.title }),
+              h(PortraitFigure, { activity, level: props.mouth ?? level, title: props.title }),
               h('span', { className: 'dvc-figure-ring', 'data-active': activity === 'speaking' ? 'true' : undefined }))
           }
           // A portrait panel rather than a circle: the relief has a face and
@@ -1879,7 +1902,8 @@
                 const response = await fetch('/.dsh-voice-call/portrait/frame', {
                   method: 'POST',
                   headers: { 'content-type': 'application/json' },
-                  body: JSON.stringify({ open: Math.min(1, Math.max(0, levelRef.current * 5.5)) }),
+                  // Already mapped to a comfortable range by the capture.
+                  body: JSON.stringify({ open: Math.min(1, Math.max(0, levelRef.current)) }),
                 })
                 if (!alive.current) break
                 if (!response.ok) { setFailed(true); break }
@@ -2060,6 +2084,9 @@
               // The same loudness the meter shows, which is what makes the
               // mouth match the sound the user actually hears.
               level: state.level,
+              // The mouth follows a smoothed envelope; the meter keeps the raw
+              // level so it stays responsive.
+              mouth: state.mouth,
               // The figure takes over from the round thumbnail once the call is
               // live: before that there is nothing to watch.
               live: state.phase === 'active',

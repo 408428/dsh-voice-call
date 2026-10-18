@@ -707,6 +707,23 @@ async function persistVoice(ctx, voice, character) {
 }
 
 /**
+ * Persist the figure switches.
+ *
+ * Separate from `persistVoice` because these describe how the figure is drawn,
+ * not which voice it uses; folding them into the voice write would make an
+ * unrelated change rewrite the selection.
+ *
+ * @param ctx - plugin context carrying the settings service.
+ * @param patch - the switch values to store.
+ */
+async function persistSwitches(ctx, patch) {
+  const settings = ctx.get('settings')
+  const entry = ctx.fiber?.entry?.options?.id
+  if (settings === undefined || entry === undefined) return
+  await settings.update(entry, patch)
+}
+
+/**
  * Store one uploaded recording as a cloneable voice.
  *
  * The sample is normalized to the 16 kHz mono PCM16 WAV the rest of the plugin
@@ -1833,6 +1850,24 @@ export function apply(ctx, config) {
     voiceLoaded = true
     await loadVoiceSettings(ctx, voice)
   }
+  /**
+   * Read one volatile switch as it stands right now.
+   *
+   * `ensureVoice` is a one-shot, so a switch flipped later would be invisible to
+   * it. These few booleans are cheap, so they are asked for on every request
+   * rather than cached with the voice selection.
+   */
+  const liveSwitch = async (name, fallback) => {
+    const settings = ctx.get('settings')
+    const entry = ctx.fiber?.entry?.options?.id
+    if (settings === undefined || entry === undefined) return readConfig(config[name], fallback)
+    try {
+      const described = settings.describe().find((item) => item.ns === entry)
+      const value = described?.value?.[name]
+      if (typeof value === 'boolean') return value
+    } catch { /* fall through to the config default */ }
+    return readConfig(config[name], fallback)
+  }
   const piper = new LocalEngine(ctx, config, {
     label: 'local voice',
     worker: localPaths(config).worker,
@@ -2117,6 +2152,17 @@ export function apply(ctx, config) {
           if (typeof patch.cloudVoice === 'string') voice.cloudVoice = patch.cloudVoice
           if (typeof patch.cloneId === 'string') voice.cloneId = patch.cloneId
           if (typeof patch.cloudFallback === 'boolean') voice.cloudFallback = patch.cloudFallback
+          // The figure switches are not part of the voice selection: they live
+          // in the profile entry directly, the same way the voice does.
+          if (typeof patch.portrait === 'boolean' || typeof patch.relief === 'boolean') {
+            await persistSwitches(ctx, {
+              ...typeof patch.portrait === 'boolean' ? { portrait: patch.portrait } : {},
+              ...typeof patch.relief === 'boolean' ? { relief: patch.relief } : {},
+            })
+            // Read back so the next frame is built the way the switch says.
+            if (typeof patch.portrait === 'boolean') portraitCache.key = ''
+            if (typeof patch.relief === 'boolean') reliefCache.key = ''
+          }
           // The prompt variable follows the selection, so the agent's name for
           // itself changes with the voice rather than at the next call.
           await refreshCharacter()
@@ -2287,7 +2333,7 @@ export function apply(ctx, config) {
           // Frames are pulled rather than pushed: the browser asks for the next
           // one when it is ready, so a slow GPU throttles the animation instead
           // of building a queue of stale frames.
-          if (!readConfig(config.portrait, false)) {
+          if (!await liveSwitch('portrait', false)) {
             throw new RequestError('The portrait animator is switched off', 409)
           }
           const body = await readBody(req, config.maxTextBytes)
@@ -2297,7 +2343,9 @@ export function apply(ctx, config) {
           } catch {
             throw new RequestError('Expected a JSON object', 400)
           }
-          const opening = Math.max(0, Math.min(1, Number(wanted?.open ?? 0)))
+          // The engine's useful range runs above 1: an opening of 1.0 changes
+          // only 0.03% of the frame, while 3.0 is a wide open mouth.
+          const opening = Math.max(0, Math.min(3, Number(wanted?.open ?? 0)))
           await ensureVoice()
           const stored = await readFigure(config)
           if (stored === undefined) throw new RequestError('There is no picture to animate', 400)
@@ -2322,7 +2370,7 @@ export function apply(ctx, config) {
         if (route === `${ROUTE_PREFIX}/portrait` && req.method === 'HEAD') {
           // Whether the animator can run at all, so the call can choose between
           // a moving mouth and a still picture before it asks for a frame.
-          const enabled = readConfig(config.portrait, false)
+          const enabled = await liveSwitch('portrait', false)
           const stored = await readFigure(config)
           const available = enabled && stored !== undefined
           res.writeHead(200, {

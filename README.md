@@ -239,9 +239,19 @@ own geometry. That is a different thing from the photo relief, which can only
 stretch a region of a picture.
 
 A model **replaces** the photo figure when one is present. The install ships
-with **Alicia Solid**, the VRM Consortium's official sample character (7.5 MB,
-55 bones, 17 expressions including all five vowels and `blink`), so a call shows
-a real 3D character without anything being downloaded first. The photo relief
+with **Seed-san**, the VRM specification's own adult sample character (10.4 MB,
+51 bones, 18 expressions including all five vowels and `blink`), so a call shows
+a real 3D character without anything being downloaded first.
+
+Two things make a VRM look alive rather than like a model viewer:
+
+- **A pose.** A VRM is authored in T-pose, arms straight out, because that is the
+  shape a rig is built in -- the file says nothing about how to stand. The client
+  lowers the arms, and detects which sign does that, because a VRM 0.x model faces
+  the opposite way to a VRM 1.0 one and the bones inherit that. Measured on both
+  samples: hand-to-hand span 1.23 m to 0.53 m, hands 0.56 m below the head.
+- **A face-filling camera.** A full-body shot reads as a game avatar standing in
+  a room; a call is a conversation, so the camera frames head and shoulders. The photo relief
 remains as the fallback for a deployment that has no model, because a VRM has to
 come from somewhere: single-image reconstruction cannot produce a rigged
 character with blend shapes, so a model is either made by hand or downloaded

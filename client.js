@@ -1680,8 +1680,11 @@
         const scene = new THREE.Scene()
         // A three-quarter view, close enough that the face fills the panel.
         const camera = new THREE.PerspectiveCamera(30, 3 / 4, 0.1, 20)
-        camera.position.set(0, 1.36, 1.15)
-        camera.lookAt(0, 1.32, 0)
+        // Framed head-and-shoulders. A full-body view makes a VRM read as a game
+        // avatar standing in a room; a call is a conversation, so the face should
+        // fill the panel.
+        camera.position.set(0, 1.42, 0.92)
+        camera.lookAt(0, 1.40, 0)
         scene.add(new THREE.AmbientLight(0xffffff, 1.6))
         const key = new THREE.DirectionalLight(0xffffff, 1.4)
         key.position.set(0.6, 2.2, 1.6)
@@ -1704,6 +1707,49 @@
         vrm.scene.rotation.y = Math.PI
         scene.add(vrm.scene)
 
+        // Lower the arms. A VRM is authored in T-pose -- arms straight out --
+        // because that is the shape a rig is built in, and nothing in the file
+        // says what pose to show. Without this the figure stands like a scarecrow.
+        // The rotations are the usual relaxed rest pose: upper arms down along
+        // the body, forearms slightly forward.
+        const humanoid = vrm.humanoid
+        if (humanoid !== undefined) {
+          const node = (bone) => humanoid.getNormalizedBoneNode?.(bone) ?? null
+          const setZ = (bone, z) => { const n = node(bone); if (n !== null) n.rotation.z = z }
+          const setX = (bone, x) => { const n = node(bone); if (n !== null) n.rotation.x = x }
+          // Which sign lowers the arm depends on the rig: a VRM 0.x model faces
+          // the opposite way to a VRM 1.0 one, and the arm bones inherit that.
+          // Rather than hard-code a guess, try one sign, measure where the hand
+          // ended up, and flip if it went UP instead of down.
+          const head = node('head')
+          const hand = node('leftHand')
+          const handHeight = () => {
+            if (head === null || hand === null) return null
+            vrm.scene.updateMatrixWorld(true)
+            const a = new THREE.Vector3()
+            const b = new THREE.Vector3()
+            head.getWorldPosition(a)
+            hand.getWorldPosition(b)
+            return a.y - b.y
+          }
+          const before = handHeight()
+          const apply = (sign) => {
+            setZ('leftUpperArm', sign * Math.PI * 0.42)
+            setZ('rightUpperArm', -sign * Math.PI * 0.42)
+            setX('leftLowerArm', 0)
+            setX('rightLowerArm', 0)
+            setZ('leftLowerArm', 0)
+            setZ('rightLowerArm', 0)
+          }
+          apply(1)
+          const after = handHeight()
+          // A lowered arm puts the hands clearly below the head. If the first
+          // attempt raised them, the other sign is the one that works.
+          if (before !== null && after !== null && after < before) apply(-1)
+          // A small elbow bend, so the arms are not ruler-straight.
+          setX('leftLowerArm', 0.18)
+          setX('rightLowerArm', 0.18)
+        }
         const expression = vrm.expressionManager
         const blinkNames = ['blink', 'blinkLeft', 'blinkRight']
         const mouthNames = ['aa', 'ih', 'ou', 'ee', 'oh']

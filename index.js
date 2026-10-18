@@ -99,7 +99,7 @@ export const Config = z.object({
    * wants the opposite; both engines take the multiplier and invert it
    * internally as their own scale.
    */
-  rate: z.number().min(0.5).max(2).default(1).volatile(),
+  rate: z.number().default(1).volatile(),
   /** Directory holding selectable Piper voices; empty selects the default under the Harness home. */
   voiceDir: z.string().default(''),
   /** Directory holding uploaded reference recordings for cloning. */
@@ -245,7 +245,9 @@ async function loadVoiceSettings(ctx, voice) {
     const row = settings.describe().find((entry_) => entry_.ns === entry)
     const saved = row?.user
     if (saved === null || typeof saved !== 'object') return
-    if (typeof saved.rate === 'number') voice.rate = saved.rate
+    // Clamped on read, because a value stored by an older version may sit
+    // outside the range this one accepts, and a call must still start.
+    if (typeof saved.rate === 'number') voice.rate = Math.min(2, Math.max(0.5, saved.rate))
     if (typeof saved.localVoiceId === 'string') voice.localVoiceId = saved.localVoiceId
     if (typeof saved.cloudVoice === 'string') voice.cloudVoice = saved.cloudVoice
     if (typeof saved.cloneId === 'string') voice.cloneId = saved.cloneId

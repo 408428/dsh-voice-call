@@ -129,10 +129,6 @@
         # is in use and the settings apply directly.
         characterDir: ''
         activeCharacter: ''
-        # Turn the call picture into a 3D relief the figure animates from: the
-        # depth model is 47 MB and lives beside the speech models. Off leaves
-        # calls on the flat picture.
-        relief: true
         # The 3D figure's own picture, separate from the avatar; empty selects
         # ~/.dsh/voice-call/figure.img and falls back to the avatar.
         figureFile: ''
@@ -144,9 +140,6 @@
         portraitPython: ''
         portraitRoot: ''
         portraitTimeoutMs: 60000
-        reliefGrid: 160
-        reliefDepth: 0.22
-        depthModel: ''
         # Local XTTS v2 cloning: about 75 s to load the model once, then about
         # 0.3 s per sentence. Its weights and the Coqui runtime live in the same
         # venv as Piper.

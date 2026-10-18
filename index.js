@@ -111,7 +111,7 @@ export const Config = z.object({
 
   /**
    * Whether the figure's mouth is animated from a photograph, using
-   * LivePortrait. Off leaves the photo relief, which stretches pixels.
+   * LivePortrait. Off leaves the picture still.
    */
   portrait: z.boolean().default(false).volatile(),
   /** The Python that has LivePortrait's dependencies; empty selects the default. */
@@ -120,23 +120,6 @@ export const Config = z.object({
   portraitRoot: z.string().default(''),
   /** How long one frame may take before it is abandoned. */
   portraitTimeoutMs: z.natural().min(1000).default(60_000),
-  /**
-   * Whether an uploaded picture is also turned into a 3D relief for the call
-   * screen. Off leaves calls on the flat picture, which needs no depth model.
-   */
-  relief: z.boolean().default(true).volatile(),
-  /** The depth model used for the relief; empty selects the default under the Harness home. */
-  depthModel: z.string().default(''),
-  /**
-   * Vertex count along the longer side of the relief mesh.
-   *
-   * A call is watched at a glance, so the mesh is deliberately coarse: 160 keeps
-   * the payload near half a megabyte, where 300 would quadruple it for detail
-   * that is not visible on a phone.
-   */
-  reliefGrid: z.natural().min(32).max(400).default(160).volatile(),
-  /** How far the nearest pixel is pushed out, in scene units. */
-  reliefDepth: z.number().min(0).max(1).default(0.22).volatile(),
   /**
    * The character a call is placed as; empty means no character is selected and
    * the voice settings above apply directly.
@@ -549,60 +532,6 @@ async function updateCharacter(ctx, config, id, patch) {
 async function deleteCharacter(ctx, config, id) {
   await rm(characterDir(config, id), { recursive: true, force: true })
   ctx.logger.info(`voice-call deleted character ${id}`)
-}
-
-/**
- * Where one picture's face calibration is stored.
- *
- * Keyed by the picture's own bytes, not by the character or the deployment:
- * replacing the picture must discard a calibration that described the old one,
- * and the same picture used twice keeps its marks.
- *
- * @param config - validated plugin configuration.
- * @param key - hash of the picture's bytes.
- */
-function calibrationPath(config, key) {
-  return join(localPaths(config).cloneDir, '..', 'calibration', `${key}.json`)
-}
-
-/**
- * Read the face calibration for one picture, if any.
- *
- * @param config - validated plugin configuration.
- * @param key - hash of the picture's bytes.
- * @returns the boxes, or null when the picture was never calibrated.
- */
-async function readCalibration(config, key) {
-  try {
-    const raw = JSON.parse(await readFile(calibrationPath(config, key), 'utf8'))
-    // Only accept a shape the renderer can use, so a hand-edited file cannot
-    // put the animation somewhere nonsensical.
-    const box = (value) => Array.isArray(value) && value.length === 4 && value.every((n) => typeof n === 'number' && n >= -0.5 && n <= 1.5)
-    if (!box(raw.mouth) || !box(raw.leftEye) || !box(raw.rightEye)) return null
-    return {
-      mouth: raw.mouth,
-      leftEye: raw.leftEye,
-      rightEye: raw.rightEye,
-      face: box(raw.face) ? raw.face : null,
-    }
-  } catch {
-    return null
-  }
-}
-
-/**
- * Store the face calibration for one picture.
- *
- * @param ctx - plugin context, for the log line.
- * @param config - validated plugin configuration.
- * @param key - hash of the picture's bytes.
- * @param boxes - the mouth and eye boxes, normalized to the picture.
- */
-async function saveCalibration(ctx, config, key, boxes) {
-  const path = calibrationPath(config, key)
-  await mkdir(dirname(path), { recursive: true })
-  await writeFile(path, JSON.stringify(boxes, null, 2), 'utf8')
-  ctx.logger.info(`voice-call saved a face calibration for picture ${key}`)
 }
 
 /**
@@ -1033,11 +962,6 @@ function localPaths(config) {
 
     worker: join(PLUGIN_DIR, 'piper_worker.py'),
     cloneWorker: join(PLUGIN_DIR, 'xtts_worker.py'),
-    // The depth model that turns a picture into a relief mesh. Beside the
-    // speech models because it is the same kind of asset: fetched once, then
-    // read from disk on every call.
-    depthModel: config.depthModel || join(root, 'models', 'depth-anything-v2-small.onnx'),
-    reliefWorker: join(PLUGIN_DIR, 'relief_worker.py'),
     // The mouth animator, the LivePortrait checkout it imports, and the
     // interpreter that has its dependencies. That interpreter is separate
     // because LivePortrait pins numpy 1.x and the speech stack needs 2.x.
@@ -1261,9 +1185,8 @@ class LocalEngine {
       settle.reject(new Error(message.error))
       return
     }
-    // A speech worker answers with `wav`; the relief worker answers with mesh
-    // fields. Resolving on the presence of `wav` keeps one reply path for both
-    // without making the speech caller unwrap an envelope it never needs.
+    // A speech worker answers with `wav`; the portrait worker answers with a
+    // JPEG. Resolving on the presence of `wav` keeps one reply path for both.
     settle.resolve(message.wav === undefined ? message : Buffer.from(message.wav, 'base64'))
   }
 
@@ -1882,16 +1805,6 @@ export function apply(ctx, config) {
     timeoutMs: config.cloneTimeoutMs,
     require: [],
   })
-  // The relief engine is separate from the speech ones: it loads a different
-  // model, it is only touched when a picture is rendered, and a call that never
-  // shows a 3D figure must not pay for loading it.
-  /**
-   * The most recent relief mesh, with the picture hash it was built from.
-   *
-   * A call re-reads the mesh on every phase change, so it is cached: only a new
-   * picture invalidates it.
-   */
-  const reliefCache = { key: '', mesh: null }
   /**
    * Which picture the portrait engine is currently loaded for.
    *
@@ -1899,17 +1812,10 @@ export function apply(ctx, config) {
    * so it is only restarted when the picture changes.
    */
   const portraitCache = { key: '' }
-  const relief = new LocalEngine(ctx, config, {
-    label: 'relief engine',
-    worker: localPaths(config).reliefWorker,
-    args: [localPaths(config).depthModel],
-    timeoutMs: config.cloneTimeoutMs,
-    require: [],
-  })
   /**
    * The mouth animator, which turns the source picture into frames.
    *
-   * Separate from the relief engine because it loads a different stack entirely:
+   * Kept apart from the speech engines because it loads a different stack:
    * LivePortrait is a PyTorch pipeline with its own Python environment, and a
    * call that never shows a face must not pay for loading it.
    */
@@ -1921,7 +1827,7 @@ export function apply(ctx, config) {
     timeoutMs: config.portraitTimeoutMs,
     require: [],
   })
-  ctx.effect(() => () => { piper.dispose(); clone.dispose(); relief.dispose(); portrait.dispose() }, 'voice-call local voices')
+  ctx.effect(() => () => { piper.dispose(); clone.dispose(); portrait.dispose() }, 'voice-call local voices')
   /**
    * Cached route ranking. Probing costs a request per provider, so the answer is
    * held for `routeTtlMs` and shared by every call in between.
@@ -2154,14 +2060,12 @@ export function apply(ctx, config) {
           if (typeof patch.cloudFallback === 'boolean') voice.cloudFallback = patch.cloudFallback
           // The figure switches are not part of the voice selection: they live
           // in the profile entry directly, the same way the voice does.
-          if (typeof patch.portrait === 'boolean' || typeof patch.relief === 'boolean') {
+          if (typeof patch.portrait === 'boolean') {
             await persistSwitches(ctx, {
               ...typeof patch.portrait === 'boolean' ? { portrait: patch.portrait } : {},
-              ...typeof patch.relief === 'boolean' ? { relief: patch.relief } : {},
-            })
+              })
             // Read back so the next frame is built the way the switch says.
             if (typeof patch.portrait === 'boolean') portraitCache.key = ''
-            if (typeof patch.relief === 'boolean') reliefCache.key = ''
           }
           // The prompt variable follows the selection, so the agent's name for
           // itself changes with the voice rather than at the next call.
@@ -2411,9 +2315,8 @@ export function apply(ctx, config) {
           await mkdir(dirname(path), { recursive: true })
           await writeFile(path, bytes)
           await writeFile(`${path}.type`, type, 'utf8')
-          // A new figure picture invalidates the mesh and any marks placed on the
-          // old one, because both describe a picture that is no longer in use.
-          reliefCache.key = ''
+          // A new picture means the animator must rebuild its source features.
+          portraitCache.key = ''
           ctx.logger.info(`voice-call stored a figure picture (${type}, ${String(bytes.length)} bytes)`)
           json(res, 201, { figure: { type, bytes: bytes.length } })
           return
@@ -2422,105 +2325,8 @@ export function apply(ctx, config) {
           const path = localPaths(config).figure
           await rm(path, { force: true })
           await rm(`${path}.type`, { force: true })
-          reliefCache.key = ''
+          portraitCache.key = ''
           json(res, 200, { figure: null })
-          return
-        }
-        if (route === `${ROUTE_PREFIX}/relief` && (req.method === 'GET' || req.method === 'HEAD')) {
-          // The mesh for the picture a call should show. Built from the same
-          // effective picture `/call-avatar` serves, so the relief and the flat
-          // avatar can never disagree about whose face is on screen.
-          await ensureVoice()
-          if (!readConfig(config.relief, true)) {
-            json(res, 200, { relief: null, reason: 'disabled' }, { 'cache-control': 'no-store' })
-            return
-          }
-          await refreshCharacter()
-          // The FIGURE picture, which is its own slot and falls back to the
-          // avatar. A character's avatar is a thumbnail, so it is not consulted
-          // here: the figure is a deployment-wide render of one face.
-          const stored = await readFigure(config)
-          if (stored === undefined) {
-            json(res, 200, { relief: null, reason: 'no-figure' }, { 'cache-control': 'no-store' })
-            return
-          }
-          // Keyed by the picture's own bytes, so replacing the picture rebuilds
-          // the mesh and nothing else does. A call re-reads this on every phase
-          // change, and rebuilding 500 KB of geometry each time would be waste.
-          const key = createHash('sha256').update(stored.bytes).digest('hex').slice(0, 24)
-          const calibration = await readCalibration(config, key)
-          if (reliefCache.key !== key) {
-            const image = join(work, 'relief-input.img')
-            await writeFile(image, stored.bytes)
-            const started = Date.now()
-            const reply = await relief.request({
-              image,
-              grid: readConfig(config.reliefGrid, 160),
-              depth: readConfig(config.reliefDepth, 0.22),
-            }, config.cloneTimeoutMs)
-            reliefCache.key = key
-            reliefCache.mesh = {
-              grid: reply.grid,
-              position: reply.position,
-              color: reply.color,
-              index: reply.index,
-              // A calibration beats the automatic guess: on a drawing the
-              // guess is often wrong, and this is how the user corrects it.
-              face: calibration ?? reply.face ?? null,
-              faceSource: calibration === null ? 'auto' : 'calibrated',
-            }
-            ctx.logger.info(`voice-call built a relief mesh (${reply.grid.join('x')}) in ${String(Date.now() - started)} ms`)
-          }
-          json(res, 200, {
-            relief: {
-              ...reliefCache.mesh,
-              // Re-read rather than cached with the mesh: a calibration saved
-              // after the mesh was built must apply to the next read.
-              face: calibration ?? reliefCache.mesh.face,
-              faceSource: calibration === null ? 'auto' : 'calibrated',
-            },
-            key,
-          }, { 'cache-control': 'no-store' })
-          return
-        }
-        if (route === `${ROUTE_PREFIX}/calibration` && req.method === 'POST') {
-          // Save the boxes the user marked for the current picture.
-          const body = await readBody(req, config.maxTextBytes)
-          let boxes
-          try {
-            boxes = JSON.parse(body.toString('utf8'))
-          } catch {
-            throw new RequestError('A calibration must be a JSON object', 400)
-          }
-          const box = (value) => Array.isArray(value) && value.length === 4
-            && value.every((n) => typeof n === 'number' && Number.isFinite(n) && n >= -0.5 && n <= 1.5)
-          if (boxes === null || typeof boxes !== 'object'
-            || !box(boxes.mouth) || !box(boxes.leftEye) || !box(boxes.rightEye)) {
-            throw new RequestError('A calibration needs mouth, leftEye, and rightEye boxes', 400)
-          }
-          await ensureVoice()
-          // The FIGURE picture, the same one the mesh is built from: keying the
-          // marks to a different image would write them where nothing reads.
-          const stored = await readFigure(config)
-          if (stored === undefined) throw new RequestError('There is no picture to calibrate', 400)
-          const key = createHash('sha256').update(stored.bytes).digest('hex').slice(0, 24)
-          await saveCalibration(ctx, config, key, {
-            face: box(boxes.face) ? boxes.face : null,
-            mouth: boxes.mouth,
-            leftEye: boxes.leftEye,
-            rightEye: boxes.rightEye,
-          })
-          json(res, 200, { calibrated: key })
-          return
-        }
-        if (route === `${ROUTE_PREFIX}/calibration` && req.method === 'DELETE') {
-          // Forget the marks, so the automatic guess applies again.
-          await ensureVoice()
-          const stored = await readFigure(config)
-          if (stored === undefined) throw new RequestError('There is no picture to calibrate', 400)
-          const key = createHash('sha256').update(stored.bytes).digest('hex').slice(0, 24)
-          await rm(calibrationPath(config, key), { force: true })
-          json(res, 200, { cleared: key })
           return
         }
         if (route === `${ROUTE_PREFIX}/call-avatar` && (req.method === 'GET' || req.method === 'HEAD')) {

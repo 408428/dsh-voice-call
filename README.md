@@ -235,8 +235,8 @@ may leave this machine at all, which is not a property of who is speaking.
 The photograph can be the figure, with its mouth driven by the audio.
 LivePortrait rebuilds each frame from the source picture through implicit
 keypoints, so the person on screen stays the person in the photograph -- which is
-what neither of the other options does: a VRM is smooth but is somebody else, and
-a stretched relief looks wrong.
+and it is the only figure the plugin offers: it is the person in the picture, and
+the mouth is generated rather than stretched.
 
 **Only the mouth moves.** Measured on a real portrait, driving the lip
 retargeting changed 0.15% of the pixels, all of them around the mouth. That is
@@ -259,56 +259,6 @@ plugin spawns that interpreter for this engine alone.
 
 The honest limit: this is 2D. The face cannot turn away from the camera, and a
 profile view works badly.
-
-## The 3D figure
-
-An uploaded picture can become a **relief** that the call animates, instead of a
-flat image.
-
-The figure has **its own picture**, separate from the avatar. The two want
-different crops: an avatar reads as a small round thumbnail, while the figure
-needs the face filling the frame to have anything to animate. When no figure
-picture is set the avatar stands in, so one upload still works. A depth model estimates how near each pixel is, the pixels are pushed
-along that axis, and the result is a mesh whose vertices carry their own colour,
-so the surface is the photograph itself.
-
-That choice is deliberate and it has a limit worth stating plainly: this is a
-relief, not a round reconstruction. Turning it fully sideways shows the back of a
-plane, so the call keeps the camera within a modest angle. In exchange the figure
-looks like the person in the picture -- which a general single-image 3D
-reconstruction does not reliably do -- and it needs no 1.6 GB checkpoint, no
-compilation, and no network.
-
-What moves:
-
-| Motion | Driven by |
-| --- | --- |
-| **Mouth** | The reply's own loudness, the same level the meter shows, smoothed so it opens and closes like a mouth rather than flickering. |
-| **Blink** | A timer at an irregular 2-6 s, which reads as alive without a schedule anyone can predict. |
-| **Breathing and sway** | A slow sine, which also makes the relief readable: seen head-on, a 0.22-unit bump changes almost no pixels. |
-
-Mouth and eye positions are found **automatically**, by a face detector trained
-on **drawn** faces (YOLOv8, 42 MB, beside the depth model). That distinction is
-the whole reason this works: a detector trained on photographs scores 0.18 on a
-cel against a 0.6 threshold, while this one finds the face at 0.76 and puts the
-eyes and mouth on the features. The eyes and mouth are then placed by proportions
-inside that box -- measured against a real cel, at about 40% and 71% down it.
-
-If it ever lands wrong, the page still lets you correct it: drag the two marks
-onto the mouth and the eyes and press Save. The marks are stored against the
-picture's own bytes, so replacing the picture discards a calibration that
-described the old one. Precedence is **marks, then the detector, then a depth
-guess**, which is what runs when no face is found at all.
-
-Measured here: the model loads in 0.2 s, a mesh takes 0.3-0.6 s, and the payload
-is about 540 KB at the default grid (20 480 vertices, 40 386 triangles). The mesh
-is cached against the picture's own bytes, so a call re-reading it on every phase
-change costs 3 ms.
-
-The renderer is **written here rather than pulled in**: the shared module table
-has no 3D library, and a private copy of three.js would be about 2 MB for the one
-thing this needs. The shader is verified by compiling and linking it against a
-real GL context and reading the rendered pixels back, not by reading it.
 
 ## Voice settings
 
@@ -423,9 +373,11 @@ unavailable; the local and cloud voices are unaffected.
 - **A character's voice and rate override the settings while it is in use.** The
   cloud-fallback switch stays deployment-wide: it decides whether audio may leave
   this machine, which is not a property of who is speaking.
-- **The 3D figure needs its depth model.** It is `depth-anything-v2-small.onnx`
-  (47 MB) under `~/.dsh/voice-call/models/`. Without it the call falls back to the
-  flat picture, and `relief: false` switches the figure off entirely.
+- **The animated figure needs its switch and its environment.** Turn on
+  "Animate the picture" in Settings; it is a volatile field, so a config default
+  cannot enable it. It also needs `~/.dsh/voice-call/lp-venv` and
+  `~/.dsh/voice-call/liveportrait` (630 MB). Without either, the call shows the
+  picture still rather than failing.
 - **A clone upload is converted with ffmpeg.** The plugin runs `ffmpeg` from
   `PATH`; set `ffmpegPath` if it lives elsewhere. Without ffmpeg, only a file
   that is already 16 kHz mono PCM16 WAV can be used, and the upload reports why.

@@ -539,9 +539,10 @@
           // microphone rather than to a number chosen on one machine.
           peak = Math.max(smoothedLevel, peak * 0.995)
           const fraction = peak > 0.01 ? smoothedLevel / peak : 0
-          // A quarter to a half of the mouth's range is the useful part: past
-          // that the mouth is already open and further travel only looks odd.
-          handlers.onMouth?.(Math.min(0.55, Math.max(0, fraction * 0.55)))
+          // Measured against the engine: an opening of 1.0 changes 0.03% of the
+          // frame and is almost invisible, 2.0 is a clear open mouth, and 3.0 is
+          // wide. So the useful range sits above 1, not below it.
+          handlers.onMouth?.(Math.min(2.4, Math.max(0, fraction * 2.4)))
           if (Date.now() < calibrationEnd) {
             calibrationLevels.push(level)
             return
@@ -1902,8 +1903,9 @@
                 const response = await fetch('/.dsh-voice-call/portrait/frame', {
                   method: 'POST',
                   headers: { 'content-type': 'application/json' },
-                  // Already mapped to a comfortable range by the capture.
-                  body: JSON.stringify({ open: Math.min(1, Math.max(0, levelRef.current)) }),
+                  // Already mapped by the capture; the engine's useful range
+                  // runs above 1, so it is not clamped to 1 here.
+                  body: JSON.stringify({ open: Math.max(0, levelRef.current) }),
                 })
                 if (!alive.current) break
                 if (!response.ok) { setFailed(true); break }

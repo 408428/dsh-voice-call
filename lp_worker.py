@@ -115,7 +115,11 @@ def main():
             continue
         request_id = request.get("id")
         try:
-            opening = max(0.0, min(1.0, float(request.get("open") or 0.0)))
+            # The multiplier runs above 1 by design: the retargeting delta is
+            # small, and measured on a real portrait an opening of 1.0 changes
+            # only 0.03% of the frame while 3.0 is a wide open mouth. Clamping to
+            # 1 here is what made the mouth look almost still.
+            opening = max(0.0, min(3.0, float(request.get("open") or 0.0)))
             with torch.no_grad():
                 if opening <= 0.001:
                     # A closed mouth is the source itself, so the common resting

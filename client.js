@@ -1251,6 +1251,571 @@
       }
 
 
+      /** The frame-wide call overlay; renders nothing while no call is live. */
+      function VoiceCallOverlay(props) {
+        const { call, t } = props
+        const state = useSyncExternalStore(call.subscribe, call.getSnapshot, call.getSnapshot)
+        // The call picture is a deployment setting rather than call state, so it
+        // is read when a call opens: a picture changed in Settings then applies
+        // to the next call without a reload, and the overlay stays independent of
+        // the settings page's own store.
+        const [avatar, setAvatar] = useState({ set: false, src: '' })
+        // The relief mesh for the same picture, when the Host could build one.
+        // Null means the flat picture stands, which is what happens with no
+        // picture, with the feature switched off, or on a machine without the
+        // depth model.
+        const [relief, setRelief] = useState(null)
+        // A mesh the renderer could not use, so the picture stands instead of a
+        // blank canvas. Set when WebGL is missing or the shader will not build.
+        const [reliefBroken, setReliefBroken] = useState(false)
+        // Whether the Host can animate the picture's mouth. It is a separate
+        // engine with its own environment, so it is asked rather than assumed.
+        const [portraitSet, setPortraitSet] = useState(false)
+        const phase = state.phase
+        useEffect(() => {
+          if (phase === 'idle') return undefined
+          let live = true
+          void (async () => {
+            try {
+              // The avatar is the small round thumbnail: the active character's
+              // picture when it has one, otherwise the deployment's own.
+              const response = await fetch('/.dsh-voice-call/call-avatar', { method: 'HEAD' })
+              if (!live || !response.ok) return
+              const type = response.headers.get('x-avatar')
+              if (type === null || type === 'none') { setAvatar({ set: false, src: '' }); return }
+              setAvatar({ set: true, src: `/.dsh-voice-call/call-avatar?rev=${String(Date.now())}` })
+            } catch { /* no picture is the same as an unreadable one */ }
+          })()
+          return () => { live = false }
+        }, [phase])
+        useEffect(() => {
+          if (phase === 'idle') return undefined
+          let live = true
+          void (async () => {
+            try {
+              const response = await fetch('/.dsh-voice-call/portrait', { method: 'HEAD' })
+              if (!live || !response.ok) return
+              setPortraitSet(response.headers.get('x-portrait') === 'ready')
+            } catch { /* no animator means the picture stands */ }
+          })()
+          return () => { live = false }
+        }, [phase])
+        // The mesh is fetched once per call, from the same effective picture.
+        // Decoding 500 KB of geometry on every phase change would stall the
+        // animation, so the decoded form is kept and reused.
+        useEffect(() => {
+          if (phase === 'idle') { setRelief(null); return undefined }
+          let live = true
+          void (async () => {
+            try {
+              const response = await fetch('/.dsh-voice-call/relief')
+              if (!live || !response.ok) return
+              const body = await response.json()
+              if (body.relief === null) return
+              setRelief({
+                grid: body.relief.grid,
+                position: decodeReliefField(body.relief.position),
+                color: decodeReliefField(body.relief.color),
+                index: decodeReliefField(body.relief.index),
+                face: body.relief.face ?? null,
+              })
+            } catch { /* the flat picture stands */ }
+          })()
+          return () => { live = false }
+        }, [phase])
+        if (state.phase === 'idle') return null
+        const hint = state.muted && state.phase === 'active' ? t('hint.muted')
+          : state.activity === 'speaking' ? t('hint.speaking')
+            : state.activity === 'transcribing' ? t('hint.transcribing')
+              : state.activity === 'thinking' ? t('hint.thinking')
+                : state.phase === 'incoming' ? t('hint.accept')
+                  : state.phase === 'calling' ? t('hint.connecting')
+                    : t('hint.listening')
+        return h('div', {
+          className: 'dvc-root',
+          'data-phase': state.phase,
+          // Inline, not only in CSS: the overlay layer's own `> *` rule turns
+          // pointer events back on for every entry, and this surface must stay
+          // click-through except for the card.
+          style: { pointerEvents: 'none' },
+        },
+          h('style', null, CSS),
+          h('div', { className: 'dvc-card', role: 'dialog', 'aria-label': t('phase.active') },
+            h('div', { className: 'dvc-phase' }, t(`phase.${state.phase}`)),
+            h(Avatar, {
+              title: state.title, sessionId: state.sessionId, activity: state.activity,
+              avatar: avatar.set, avatarSrc: avatar.src,
+              // The mesh, unless the renderer already failed on this call -- in
+              // which case the picture stands rather than a blank canvas.
+              relief: reliefBroken ? null : relief,
+              // A photo whose mouth moves wins over the stretched relief.
+              portrait: portraitSet,
+              // The same loudness the meter shows, which is what makes the
+              // mouth match the sound the user actually hears.
+              level: state.level,
+              // The mouth follows a smoothed envelope; the meter keeps the raw
+              // level so it stays responsive.
+              mouth: state.mouth,
+              // The figure takes over from the round thumbnail once the call is
+              // live: before that there is nothing to watch.
+              live: state.phase === 'active',
+              onReliefFailed: () => { setReliefBroken(true) },
+            }),
+            h('div', { className: 'dvc-title' }, state.title || state.sessionId),
+            h('div', { className: 'dvc-hint' }, hint),
+            state.phase === 'active' && h('div', { className: 'dvc-meter' },
+              h('span', { style: { transform: `scaleX(${String(Math.min(1, state.level * 14))})` } })),
+            state.phase === 'active' && h('div', { className: 'dvc-clock' }, clock(state.elapsed)),
+            state.phase === 'active' && state.device !== '' && h('div', { className: 'dvc-device', title: state.device },
+              t('hint.device', { name: state.device })),
+            state.phase === 'active' && state.route !== null && h('div', { className: 'dvc-device', title: state.route },
+              t('hint.route', { name: state.route })),
+            state.notice && h('div', { className: 'dvc-notice', role: 'status' },
+              t(state.notice.key, state.notice.params)),
+            h(Lines, { lines: state.lines, t }),
+            h('div', { className: 'dvc-actions' },
+              state.phase === 'incoming'
+                ? [
+                  h(RoundButton, { key: 'accept', tone: 'accept', label: t('action.accept'), onClick: () => { call.accept() } }, h(IconPhone, null)),
+                  h(RoundButton, { key: 'decline', tone: 'hangup', label: t('action.decline'), onClick: () => { call.hangUp() } }, h(IconPhoneDown, null)),
+                ]
+                : [
+                  state.phase === 'active' && h(RoundButton, {
+                    key: 'mute', tone: state.muted ? 'muted' : 'neutral',
+                    label: t(state.muted ? 'action.unmute' : 'action.mute'),
+                    onClick: () => { call.toggleMute() },
+                  }, h(state.muted ? IconMicOff : IconMic)),
+                  h(RoundButton, { key: 'hangup', tone: 'hangup', label: t('action.hangUp'), onClick: () => { call.hangUp() } }, h(IconPhoneDown, null)),
+                ].filter(Boolean),
+            ),
+          ),
+        )
+      }
+
+      /** Spoken-transcript bubbles, newest last. */
+      function Lines(props) {
+        const box = useRef(null)
+        useEffect(() => {
+          const node = box.current
+          if (node) node.scrollTop = node.scrollHeight
+        }, [props.lines])
+        if (props.lines.length === 0) return null
+        return h('div', { className: 'dvc-lines', ref: box },
+          props.lines.slice(-8).map((line, index) => h('div', {
+            key: `${String(index)}-${line.role}`,
+            className: 'dvc-line',
+            'data-role': line.role,
+          }, h('span', { className: 'dvc-line-who' }, props.t(line.role === 'you' ? 'you' : 'agent')), line.text)),
+        )
+      }
+
+      /**
+       * Sidebar-foot control that starts a call in a fresh, fast conversation.
+       *
+       * It sits above Settings. Placing a call always begins a new Session so a
+       * call never mixes into an unrelated thread, and that Session is switched
+       * to the fastest available route before the first word is spoken.
+       */
+      function VoiceCallButton(props) {
+        const { call, t, wide } = props
+        const state = useSyncExternalStore(call.subscribe, call.getSnapshot, call.getSnapshot)
+        const start = useCallback(() => { call.begin() }, [call])
+        // The rail renders icons only, so the label rides the accessible name.
+        return h('button', {
+          type: 'button',
+          className: wide ? 'dvc-foot' : 'dvc-foot dvc-foot-rail',
+          onClick: start,
+          disabled: state.phase !== 'idle',
+          'aria-label': t('action.call'),
+          title: t('action.call'),
+        }, h(IconPhone, null), wide && h('span', { className: 'dvc-foot-label' }, t('action.call')))
+      }
+
+      /**
+       * Characters controller.
+       *
+       * A character bundles a personality, a voice, and a picture, so choosing
+       * one chooses how a call behaves, sounds, and looks in a single action.
+       * The roster is Host state: this store only mirrors it and forwards edits.
+       *
+       * @param t - namespace-bound translator.
+       * @returns the roster store and its actions.
+       */
+      function createCharacters(t) {
+        const store = createStore({
+          loading: true,
+          error: null,
+          characters: [],
+          activeId: '',
+          settingsRate: 1,
+          voices: [],
+          cloudVoices: [],
+          /** Id of the character open for editing, or '' for the roster. */
+          editing: '',
+          /** The draft being edited, so typing does not write on every keystroke. */
+          draft: null,
+          saving: false,
+          notice: null,
+        })
+        const read = async () => {
+          try {
+            const response = await fetch('/.dsh-voice-call/characters')
+            if (!response.ok) throw new Error(`HTTP ${String(response.status)}`)
+            const body = await response.json()
+            store.set({
+              loading: false,
+              error: null,
+              characters: body.characters ?? [],
+              activeId: body.activeCharacter ?? '',
+              settingsRate: typeof body.settingsRate === 'number' ? body.settingsRate : 1,
+              voices: body.voices ?? [],
+              cloudVoices: body.cloudVoices ?? [],
+            })
+          } catch (error) {
+            store.set({ loading: false, error: String(error?.message ?? error) })
+          }
+        }
+        /**
+         * Send one request and report the outcome in the store.
+         * @param path - route path.
+         * @param method - HTTP method.
+         * @param body - JSON body, when the request has one.
+         * @returns the parsed reply, or null on failure.
+         */
+        const send = async (path, method, body) => {
+          store.set({ saving: true, notice: null })
+          try {
+            const response = await fetch(path, {
+              method,
+              ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+            })
+            const parsed = await response.json().catch(() => null)
+            if (!response.ok) throw new Error(parsed?.error ?? `HTTP ${String(response.status)}`)
+            store.set({ saving: false })
+            return parsed
+          } catch (error) {
+            store.set({ saving: false, notice: { key: 'characters.failed', params: { message: String(error?.message ?? error) } } })
+            return null
+          }
+        }
+        // Built as a named object so `save` can reach its own siblings: it
+        // uploads a staged picture through the same action the UI would use.
+        const api = {
+          store, read, send,
+          /** Start a new character from the current voice settings. */
+          beginCreate: () => store.set({ editing: 'new', draft: { name: '', personality: '', voice: { engine: '', localVoiceId: '', cloudVoice: '', cloneId: '', rate: null }, image: null, imagePreview: '', imageRemoved: false } }),
+          /** Open one character for editing. */
+          beginEdit: (character) => store.set({ editing: character.id, draft: { name: character.name, personality: character.personality, voice: { ...character.voice, rate: character.voice?.rate ?? null }, image: null, imagePreview: '', imageRemoved: false } }),
+          /** Leave the editor without saving. */
+          cancelEdit: () => store.set({ editing: '', draft: null }),
+          /** Change one draft field. */
+          setDraft: (patch) => store.set({ draft: { ...store.getSnapshot().draft, ...patch } }),
+          /** Change one draft voice field. */
+          setDraftVoice: (patch) => store.set({ draft: { ...store.getSnapshot().draft, voice: { ...store.getSnapshot().draft.voice, ...patch } } }),
+          /**
+           * Stage a picture for this character.
+           *
+           * Staged rather than uploaded at once: a character being created has no
+           * id yet, so there is nothing to attach the picture to. The save
+           * uploads it once the record exists.
+           *
+           * @param file - the chosen image.
+           * @param preview - a data URL for the preview, read by the caller.
+           */
+          setDraftImage: (file, preview) => store.set({ draft: { ...store.getSnapshot().draft, image: file, imagePreview: preview, imageRemoved: false } }),
+          /** Drop the picture, either one just staged or the stored one. */
+          clearDraftImage: () => store.set({ draft: { ...store.getSnapshot().draft, image: null, imagePreview: '', imageRemoved: true } }),
+          /** Write the draft, creating or updating as the editor was opened. */
+          save: async () => {
+            const { editing, draft } = store.getSnapshot()
+            if (draft === null) return
+            const payload = { name: draft.name, personality: draft.personality, voice: draft.voice }
+            const result = editing === 'new'
+              ? await send('/.dsh-voice-call/characters', 'POST', payload)
+              : await send(`/.dsh-voice-call/characters/${encodeURIComponent(editing)}`, 'PATCH', payload)
+            if (result === null) return
+            // The picture is attached now that the character has an id. A
+            // failure here must not lose the fields that were just saved, so it
+            // is reported on its own and the roster still refreshes.
+            const id = result.character?.id ?? editing
+            if (draft.image !== null) await api.uploadAvatar(id, draft.image)
+            else if (draft.imageRemoved) await api.removeAvatar(id)
+            store.set({ editing: '', draft: null, notice: { key: 'characters.saved' } })
+            await read()
+          },
+          /** Delete one character. */
+          remove: async (id) => {
+            const result = await send(`/.dsh-voice-call/characters/${encodeURIComponent(id)}`, 'DELETE')
+            if (result === null) return
+            await read()
+          },
+          /** Make one character the one calls are placed as. */
+          activate: async (id) => {
+            const result = await send('/.dsh-voice-call/active-character', 'POST', { id })
+            if (result === null) return
+            store.set({ activeId: result.activeCharacter })
+            await read()
+          },
+          /** Remove one character's stored picture. */
+          removeAvatar: async (id) => {
+            try {
+              await fetch(`/.dsh-voice-call/characters/${encodeURIComponent(id)}/avatar`, { method: 'DELETE' })
+            } catch { /* a picture that cannot be removed is reported by the roster refresh */ }
+          },
+          /** Upload one character's picture. */
+          uploadAvatar: async (id, file) => {
+            store.set({ saving: true, notice: null })
+            try {
+              const response = await fetch(`/.dsh-voice-call/characters/${encodeURIComponent(id)}/avatar`, {
+                method: 'POST',
+                headers: { 'content-type': file.type || 'image/png' },
+                body: await file.arrayBuffer(),
+              })
+              if (!response.ok) {
+                const parsed = await response.json().catch(() => null)
+                throw new Error(parsed?.error ?? `HTTP ${String(response.status)}`)
+              }
+              store.set({ saving: false, notice: { key: 'characters.avatarOk' } })
+              await read()
+            } catch (error) {
+              store.set({ saving: false, notice: { key: 'characters.failed', params: { message: String(error?.message ?? error) } } })
+            }
+          },
+        }
+        return api
+      }
+
+      /**
+       * Voice settings controller.
+       *
+       * One Host read fills the page; every change writes back immediately, so
+       * there is no separate save step to forget. The Host owns the values and
+       * the speech path reads the same state, which is why a change here takes
+       * effect on the next call rather than on the next restart.
+       *
+       * @param ctx - Client plugin context.
+       * @param t - namespace-bound translator.
+       * @returns the settings store and its actions.
+       */
+      function createVoiceSettings(ctx, t) {
+        const store = createStore({
+          loading: true,
+          error: null,
+          rate: 1,
+          localVoiceId: '',
+          cloudVoice: '',
+          cloneId: '',
+          cloudFallback: true,
+          /** Whether the picture's mouth is animated rather than shown flat. */
+          portrait: false,
+          voices: [],
+          cloudVoices: [],
+          saving: false,
+          notice: null,
+          /** Whether a custom avatar is stored; the bytes are fetched separately. */
+          avatarSet: false,
+          /** A cache-busting token, so a replaced picture is not served from cache. */
+          avatarRev: 0,
+          /**
+           * The picture the 3D figure is built from, which is its own slot: the
+           * avatar is a thumbnail, the figure wants a face-filling crop, so they
+           * are chosen apart. When no figure is set the avatar stands in.
+           */
+          figureSet: false,
+          /** Whether the figure has its own picture rather than borrowing the avatar. */
+          figureOwn: false,
+          figureRev: 0,
+        })
+        const write = async (patch) => {
+          store.set({ saving: true, notice: null })
+          try {
+            const response = await fetch('/.dsh-voice-call/settings', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify(patch),
+            })
+            if (!response.ok) {
+              const body = await response.json().catch(() => null)
+              throw new Error(body?.error ?? `HTTP ${String(response.status)}`)
+            }
+            const body = await response.json()
+            store.set({ ...body.settings, saving: false, notice: { key: 'settings.saved' } })
+          } catch (error) {
+            store.set({ saving: false, notice: { key: 'settings.saveFailed', params: { message: String(error?.message ?? error) } } })
+          }
+        }
+        /** Drop the stored picture and fall back to the generated avatar. */
+        /**
+         * Read whether a figure picture is set, and whether it is its own.
+         * @returns the figure state, to merge into the store.
+         */
+        const readFigureState = async () => {
+          try {
+            const response = await fetch('/.dsh-voice-call/figure', { method: 'HEAD' })
+            if (!response.ok) return { figureSet: false, figureOwn: false, figureRev: Date.now() }
+            const type = response.headers.get('x-figure')
+            if (type === null || type === 'none') return { figureSet: false, figureOwn: false, figureRev: Date.now() }
+            return { figureSet: true, figureOwn: response.headers.get('x-figure-source') === 'own', figureRev: Date.now() }
+          } catch {
+            return { figureSet: false, figureOwn: false, figureRev: Date.now() }
+          }
+        }
+
+        const load = async () => {
+          store.set({ loading: true, error: null })
+          try {
+            const response = await fetch('/.dsh-voice-call/voices')
+            if (!response.ok) throw new Error(`HTTP ${String(response.status)}`)
+            const body = await response.json()
+            store.set({
+              loading: false,
+              voices: body.voices ?? [],
+              cloudVoices: body.cloudVoices ?? [],
+              avatarSet: await readAvatarState(),
+              ...(await readFigureState()),
+              ...body.settings,
+            })
+          } catch (error) {
+            store.set({ loading: false, error: String(error?.message ?? error) })
+          }
+        }
+        /**
+         * Upload one recording and make it the selected voice.
+         *
+         * The recording is sent as raw WAV bytes rather than a form, because
+         * the browser already produces exactly the format the Host validates.
+         * @param file - the chosen recording.
+         * @param name - display name for the new voice.
+         */
+        const clone = async (file, name) => {
+          store.set({ saving: true, notice: null })
+          try {
+            const response = await fetch(`/.dsh-voice-call/clone?name=${encodeURIComponent(name)}`, {
+              method: 'POST',
+              headers: { 'content-type': 'audio/wav' },
+              body: await file.arrayBuffer(),
+            })
+            const body = await response.json().catch(() => null)
+            if (!response.ok) throw new Error(body?.error ?? `HTTP ${String(response.status)}`)
+            await load()
+            await write({ cloneId: body.voice.id })
+            // Say when the recording was converted, so a user who uploaded an
+            // MP3 knows it was understood rather than silently altered.
+            store.set({ notice: { key: body.converted === true ? 'settings.cloneConverted' : 'settings.cloneOk', params: { name: body.voice.name } } })
+          } catch (error) {
+            store.set({ saving: false, notice: { key: 'settings.cloneFailed', params: { message: String(error?.message ?? error) } } })
+          }
+        }
+        /**
+         * Delete one cloned voice and its recording.
+         *
+         * The Host clears the selection when it deleted the voice that was in
+         * use, so the reload below shows the resolved fallback rather than a
+         * voice that no longer exists.
+         *
+         * @param id - clone id.
+         * @param name - display name, for the confirmation and the notice.
+         */
+        const removeVoice = async (id, name) => {
+          store.set({ saving: true, notice: null })
+          try {
+            const response = await fetch(`/.dsh-voice-call/voices/${encodeURIComponent(id)}`, { method: 'DELETE' })
+            const body = await response.json().catch(() => null)
+            if (!response.ok) throw new Error(body?.error ?? `HTTP ${String(response.status)}`)
+            await load()
+            store.set({ saving: false, notice: { key: 'settings.voiceRemoved', params: { name } } })
+          } catch (error) {
+            store.set({ saving: false, notice: { key: 'settings.cloneFailed', params: { message: String(error?.message ?? error) } } })
+          }
+        }
+        /**
+         * Upload one image as the call picture.
+         *
+         * The bytes go up with their media type in the header rather than as a
+         * form, because the route takes a single field and a multipart body
+         * would only add a parser on both sides.
+         * @param file - the chosen image.
+         */
+        const uploadAvatar = async (file) => {
+          store.set({ saving: true, notice: null })
+          try {
+            const response = await fetch('/.dsh-voice-call/avatar', {
+              method: 'POST',
+              headers: { 'content-type': file.type || 'image/png' },
+              body: await file.arrayBuffer(),
+            })
+            if (!response.ok) {
+              const body = await response.json().catch(() => null)
+              throw new Error(body?.error ?? `HTTP ${String(response.status)}`)
+            }
+            // A new picture must not be answered from the browser's cache.
+            store.set({ saving: false, avatarSet: true, avatarRev: Date.now(), notice: { key: 'settings.avatarOk' } })
+          } catch (error) {
+            store.set({ saving: false, notice: { key: 'settings.avatarFailed', params: { message: String(error?.message ?? error) } } })
+          }
+        }
+        /**
+         * Upload the picture the 3D figure is built from.
+         * @param file - the chosen image.
+         */
+        const uploadFigure = async (file) => {
+          store.set({ saving: true, notice: null })
+          try {
+            const response = await fetch('/.dsh-voice-call/figure', {
+              method: 'POST',
+              headers: { 'content-type': file.type || 'image/png' },
+              body: await file.arrayBuffer(),
+            })
+            if (!response.ok) {
+              const body = await response.json().catch(() => null)
+              throw new Error(body?.error ?? `HTTP ${String(response.status)}`)
+            }
+            store.set({ saving: false, ...(await readFigureState()), notice: { key: 'settings.figureOk' } })
+          } catch (error) {
+            store.set({ saving: false, notice: { key: 'settings.figureFailed', params: { message: String(error?.message ?? error) } } })
+          }
+        }
+        const clearFigure = async () => {
+          store.set({ saving: true, notice: null })
+          try {
+            await fetch('/.dsh-voice-call/figure', { method: 'DELETE' })
+            store.set({ saving: false, ...(await readFigureState()), notice: { key: 'settings.figureCleared' } })
+          } catch (error) {
+            store.set({ saving: false, notice: { key: 'settings.figureFailed', params: { message: String(error?.message ?? error) } } })
+          }
+        }
+        const clearAvatar = async () => {
+          store.set({ saving: true, notice: null })
+          try {
+            const response = await fetch('/.dsh-voice-call/avatar', { method: 'DELETE' })
+            if (!response.ok) throw new Error(`HTTP ${String(response.status)}`)
+            store.set({ saving: false, avatarSet: false, avatarRev: Date.now(), notice: { key: 'settings.avatarCleared' } })
+          } catch (error) {
+            store.set({ saving: false, notice: { key: 'settings.avatarFailed', params: { message: String(error?.message ?? error) } } })
+          }
+        }
+        return { store, load, write, clone, removeVoice, uploadAvatar, clearAvatar, uploadFigure, clearFigure }
+      }
+
+      /**
+       * Whether a custom call picture is stored.
+       *
+       * The route answers 200 either way and reports the type in `x-avatar`, so
+       * the header decides: `ok` alone would report every call as having a
+       * picture and draw a preview for a file that does not exist.
+       * @returns whether an avatar is stored.
+       */
+      async function readAvatarState() {
+        try {
+          const response = await fetch('/.dsh-voice-call/avatar', { method: 'HEAD' })
+          if (!response.ok) return false
+          const type = response.headers.get('x-avatar')
+          return type !== null && type !== 'none'
+        } catch {
+          return false
+        }
+      }
+
       /**
        * A photograph whose mouth moves with the audio.
        *

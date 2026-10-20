@@ -419,6 +419,9 @@ async function readCharacter(config, id) {
       id,
       name: typeof raw.name === 'string' && raw.name.trim() !== '' ? raw.name.trim() : id,
       personality: typeof raw.personality === 'string' ? raw.personality : '',
+      // What this character says first when a call is answered. Empty means the
+      // call waits for the user, which is the old behaviour.
+      opening: typeof raw.opening === 'string' ? raw.opening.slice(0, 300) : '',
       voice: {
         // Which engine the character chose. Stored explicitly because "no local
         // voice named" is not the same as "the cloud was chosen": the first
@@ -471,7 +474,7 @@ async function listCharacters(config) {
  * @param voice - the voice selection to start from.
  * @returns the created character.
  */
-async function createCharacter(ctx, config, name, personality, voice) {
+async function createCharacter(ctx, config, name, personality, voice, opening) {
   const id = `char-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
   const home = characterDir(config, id)
   await mkdir(home, { recursive: true })
@@ -479,6 +482,7 @@ async function createCharacter(ctx, config, name, personality, voice) {
   const record = {
     name: label,
     personality: personality.slice(0, 4000),
+    opening: typeof opening === 'string' ? opening.slice(0, 300) : '',
     voice: {
       engine: ['local', 'clone', 'cloud'].includes(voice?.engine) ? voice.engine : '',
       localVoiceId: voice?.localVoiceId ?? '',
@@ -507,6 +511,7 @@ async function updateCharacter(ctx, config, id, patch) {
   const record = {
     name: typeof patch.name === 'string' && patch.name.trim() !== '' ? patch.name.trim().slice(0, 40) : current.name,
     personality: typeof patch.personality === 'string' ? patch.personality.slice(0, 4000) : current.personality,
+    opening: typeof patch.opening === 'string' ? patch.opening.slice(0, 300) : current.opening,
     voice: {
       engine: ['local', 'clone', 'cloud'].includes(patch.voice?.engine) ? patch.voice.engine : current.voice.engine,
       localVoiceId: typeof patch.voice?.localVoiceId === 'string' ? patch.voice.localVoiceId : current.voice.localVoiceId,
@@ -2118,6 +2123,18 @@ export function apply(ctx, config) {
           json(res, 200, { deleted: id, cleared })
           return
         }
+        if (route === `${ROUTE_PREFIX}/opening` && req.method === 'GET') {
+          // The line the call speaks first, and whose voice says it. Read when a
+          // call opens, so editing a character applies to the next call.
+          await ensureVoice()
+          await refreshCharacter()
+          const record = character.record
+          json(res, 200, {
+            name: record === null ? '' : record.name,
+            opening: record === null ? '' : record.opening,
+          }, { 'cache-control': 'no-store' })
+          return
+        }
         if (route === `${ROUTE_PREFIX}/characters` && req.method === 'GET') {
           // Everything the characters page needs in one read: the roster, which
           // one is active, and the voice options a character can choose from.
@@ -2149,7 +2166,7 @@ export function apply(ctx, config) {
           if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
             throw new RequestError('A character must be a JSON object', 400)
           }
-          const created = await createCharacter(ctx, config, String(patch.name ?? ''), String(patch.personality ?? ''), patch.voice)
+          const created = await createCharacter(ctx, config, String(patch.name ?? ''), String(patch.personality ?? ''), patch.voice, String(patch.opening ?? ''))
           json(res, 201, { character: created })
           return
         }

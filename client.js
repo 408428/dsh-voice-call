@@ -116,6 +116,9 @@
           'characters.personality': 'Personality',
           'characters.personalityHint': 'How this character talks and behaves. Written into the call instructions as {{character_personality}}.',
           'characters.personalityPlaceholder': 'For example: 说话简洁冷静，偶尔带点毒舌，但本质上是关心对方的。',
+          'characters.opening': 'First words',
+          'characters.openingHint': 'What this character says the moment the call is answered. Leave it empty and the call waits for you to speak first.',
+          'characters.openingPlaceholder': 'For example: 喂，我在。找我什么事？',
           'characters.voice': 'Voice',
           'characters.voiceHint': 'Which voice this character speaks with. The cloud voice follows the cloud-voice setting below.',
           'characters.rate': 'Speaking rate',
@@ -242,6 +245,9 @@
           'characters.personality': '性格',
           'characters.personalityHint': '这个角色怎么说话、怎么表现。会作为 {{character_personality}} 写进通话指令。',
           'characters.personalityPlaceholder': '例如：说话简洁冷静，偶尔带点毒舌，但本质上是关心对方的。',
+          'characters.opening': '第一句话',
+          'characters.openingHint': '接听电话后这个角色说的第一句话。留空则和以前一样，等你先开口。',
+          'characters.openingPlaceholder': '例如：喂，我在。找我什么事？',
           'characters.voice': '声线',
           'characters.voiceHint': '这个角色用哪个声音说话。选「云端声线」时使用下面的云端声线设置。',
           'characters.rate': '语速',
@@ -911,6 +917,30 @@
           })
         }
         /**
+         * Speak the character's opening line, if it has one.
+         *
+         * The line is shown as the user's own message, because that is what it
+         * is: a prompt that asks the character to begin. Disguising it as an
+         * assistant turn would leave the transcript claiming the character
+         * volunteered something nobody asked for.
+         */
+        async function openWith() {
+          const run = generation
+          let opening = ''
+          try {
+            const response = await fetch('/.dsh-voice-call/opening')
+            if (response.ok) {
+              const body = await response.json()
+              opening = typeof body?.opening === 'string' ? body.opening.trim() : ''
+            }
+          } catch { /* no opening means the call waits, as before */ }
+          if (opening === '' || run !== generation || lifetime.signal.aborted) return
+          // Record it, so the transcript shows what prompted the reply.
+          store.set({ lines: [...store.getSnapshot().lines, { role: 'user', text: opening }] })
+          await send(opening, run)
+        }
+
+        /**
          * Settle the model route for this call.
          *
          * The conversation stays on the model the deployment configured: only
@@ -1169,6 +1199,10 @@
             if (store.getSnapshot().phase !== 'incoming') return
             store.set({ phase: 'active', startedAt: Date.now() })
             void connect()
+            // Let the character speak first, if it has an opening line. Sent as
+            // an ordinary prompt so the reply is spoken and shown like any other,
+            // rather than being injected as a fake assistant turn.
+            void openWith()
           },
           /** End the call and release the microphone, playback, and stream. */
           hangUp() {
@@ -1503,9 +1537,9 @@
         const api = {
           store, read, send,
           /** Start a new character from the current voice settings. */
-          beginCreate: () => store.set({ editing: 'new', draft: { name: '', personality: '', voice: { engine: '', localVoiceId: '', cloudVoice: '', cloneId: '', rate: null }, image: null, imagePreview: '', imageRemoved: false } }),
+          beginCreate: () => store.set({ editing: 'new', draft: { name: '', personality: '', opening: '', voice: { engine: '', localVoiceId: '', cloudVoice: '', cloneId: '', rate: null }, image: null, imagePreview: '', imageRemoved: false } }),
           /** Open one character for editing. */
-          beginEdit: (character) => store.set({ editing: character.id, draft: { name: character.name, personality: character.personality, voice: { ...character.voice, rate: character.voice?.rate ?? null }, image: null, imagePreview: '', imageRemoved: false } }),
+          beginEdit: (character) => store.set({ editing: character.id, draft: { name: character.name, personality: character.personality, opening: character.opening ?? '', voice: { ...character.voice, rate: character.voice?.rate ?? null }, image: null, imagePreview: '', imageRemoved: false } }),
           /** Leave the editor without saving. */
           cancelEdit: () => store.set({ editing: '', draft: null }),
           /** Change one draft field. */
@@ -1529,7 +1563,7 @@
           save: async () => {
             const { editing, draft } = store.getSnapshot()
             if (draft === null) return
-            const payload = { name: draft.name, personality: draft.personality, voice: draft.voice }
+            const payload = { name: draft.name, personality: draft.personality, opening: draft.opening ?? '', voice: draft.voice }
             const result = editing === 'new'
               ? await send('/.dsh-voice-call/characters', 'POST', payload)
               : await send(`/.dsh-voice-call/characters/${encodeURIComponent(editing)}`, 'PATCH', payload)
@@ -2153,6 +2187,15 @@
               }),
               h('p', { className: 'dvc-set-note' }, t('characters.personalityHint'))),
             h('section', { className: 'dvc-set-block' },
+              h('label', { className: 'dvc-set-label', htmlFor: 'dvc-char-opening' }, t('characters.opening')),
+              h('input', {
+                id: 'dvc-char-opening', className: 'dvc-set-text', type: 'text', value: draft.opening ?? '',
+                placeholder: t('characters.openingPlaceholder'),
+                maxLength: '300',
+                onChange: (event) => { characters.setDraft({ opening: event.target.value }) },
+              }),
+              h('p', { className: 'dvc-set-note' }, t('characters.openingHint'))),
+            h('section', { className: 'dvc-set-block' },
               h('label', { className: 'dvc-set-label', htmlFor: 'dvc-char-voice' }, t('characters.voice')),
               h('select', {
                 id: 'dvc-char-voice', className: 'dvc-set-select', value: chosen,
@@ -2440,7 +2483,9 @@
 
       // Exposed for tests: the figure's own rendering is worth checking without
       // standing up the overlay, its session store, and its audio pipeline.
-      const internals = { Avatar, PortraitFigure }
+      // Exposed for tests: accepting a call touches the microphone, the model
+      // route, and the speech queue, which is worth driving without a browser.
+      const internals = { Avatar, PortraitFigure, createCall }
       return { name: 'voice-call', inject, apply, internals }
     },
   })

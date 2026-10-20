@@ -188,7 +188,7 @@ halves of one decision behind two nav entries.
 | --- | --- |
 | **Name** | What the character is called, and what it answers with when asked who it is. |
 | **Personality** | Prose describing how it talks and behaves. It reaches the agent as `{{character_personality}}`. |
-| **First words** | What the character says the moment a call is answered. Empty means the call waits for the user. |
+| **First words** | What the character says the moment a call is answered. It speaks the line itself, so no model round trip is spent on a greeting. Empty means the call waits for the user. |
 | **Voice** | A local voice, a cloned voice, the cloud voice, or "follow the voice settings". |
 | **Speaking rate** | Its own pace, or follow the voice settings. |
 | **Picture** | Shown on the call screen in place of the generated avatar. A new character's picture is staged and attached when the character is saved, since there is no record to attach it to before that. |

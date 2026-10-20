@@ -925,10 +925,13 @@
         /**
          * Speak the character's opening line, if it has one.
          *
-         * The line is shown as the user's own message, because that is what it
-         * is: a prompt that asks the character to begin. Disguising it as an
-         * assistant turn would leave the transcript claiming the character
-         * volunteered something nobody asked for.
+         * The character says it directly: the line is synthesized and shown as
+         * its own turn. Sending it to the model as a prompt would instead make
+         * the transcript show the USER greeting the character, and spend a round
+         * trip getting the character to answer its own words.
+         *
+         * Nothing is sent to the model here, so a call can greet you even before
+         * the route has been decided.
          */
         async function openWith() {
           const run = generation
@@ -941,9 +944,15 @@
             }
           } catch { /* no opening means the call waits, as before */ }
           if (opening === '' || run !== generation || lifetime.signal.aborted) return
-          // Record it, so the transcript shows what prompted the reply.
-          store.set({ lines: [...store.getSnapshot().lines, { role: 'user', text: opening }] })
-          await send(opening, run)
+          // The character says this itself. Sending it as a prompt would make
+          // the transcript claim the USER greeted the character, and would spend
+          // a model round trip to have the character answer its own greeting.
+          store.set({
+            activity: 'speaking',
+            lines: [...store.getSnapshot().lines, { role: 'agent', text: opening }],
+          })
+          await speak(opening, run)
+          if (run === generation && !lifetime.signal.aborted) store.set({ activity: 'listening' })
         }
 
         /**

@@ -137,6 +137,9 @@
         # stretched image, so it is on. It falls back cleanly when its environment
         # is missing: the call then shows the still picture.
         portrait: true
+        # Said when a call is answered, when the character has no line of its own.
+        # A character's own line wins, because it is the more specific instruction.
+        opening: ''
         portraitPython: ''
         portraitRoot: ''
         portraitTimeoutMs: 60000

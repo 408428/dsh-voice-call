@@ -136,6 +136,9 @@
           'characters.avatarOk': 'Picture updated.',
           'characters.failed': 'Could not save: {message}',
           'characters.confirmDelete': 'Delete this character? Its picture and settings are removed.',
+          'settings.opening': 'First words',
+          'settings.openingHint': 'What a call says the moment it is answered, when the character has no line of its own. Leave it empty and the call waits for you.',
+          'settings.openingPlaceholder': 'For example: 你好，我在。',
           'settings.portrait': 'Animate the picture',
           'settings.portraitOn': 'On: the mouth moves with the audio. LivePortrait rebuilds each frame from the picture, so the face stays the same; it runs about 14 fps and only while speaking.',
           'settings.portraitOff': 'Off: the picture is shown flat, with the mouth bent by a depth mesh. That is faster but the mouth is stretched pixels rather than a rebuilt face.',
@@ -265,6 +268,9 @@
           'characters.avatarOk': '头像已更新。',
           'characters.failed': '保存失败：{message}',
           'characters.confirmDelete': '删除这个角色？它的头像和设置会一起删除。',
+          'settings.opening': '全局第一句话',
+          'settings.openingHint': '角色自己没有开场白时，接听后说的第一句话。留空则等你先开口。',
+          'settings.openingPlaceholder': '例如：你好，我在。',
           'settings.portrait': '照片口型动画',
           'settings.portraitOn': '开启：嘴会跟着声音动。LivePortrait 会从照片逐帧重建，所以长相不变；约 14 fps，只在说话时渲染。',
           'settings.portraitOff': '关闭：显示平面照片，嘴部靠深度网格弯曲。更快，但嘴是拉伸的像素而不是重建的脸。',
@@ -1642,6 +1648,8 @@
           cloudFallback: true,
           /** Whether the picture's mouth is animated rather than shown flat. */
           portrait: false,
+          /** What a call says first when the character has no line of its own. */
+          opening: '',
           voices: [],
           cloudVoices: [],
           saving: false,
@@ -2022,6 +2030,15 @@
               h('span', { className: 'dvc-set-label' }, t('settings.fallback'))),
             h('p', { className: 'dvc-set-note' },
               t(state.cloudFallback ? 'settings.fallbackOn' : 'settings.fallbackOff'))),
+          // What a call says first, when the character has no line of its own.
+          h('section', { className: 'dvc-set-block' },
+            h('label', { className: 'dvc-set-label', htmlFor: 'dvc-opening' }, t('settings.opening')),
+            h('input', {
+              id: 'dvc-opening', className: 'dvc-set-text', type: 'text', maxLength: '300',
+              value: state.opening, placeholder: t('settings.openingPlaceholder'),
+              onChange: (event) => { void settings.write({ opening: event.target.value }) },
+            }),
+            h('p', { className: 'dvc-set-note' }, t('settings.openingHint'))),
           // Whether the picture is animated, as opposed to shown flat.
           h('section', { className: 'dvc-set-block' },
             h('label', { className: 'dvc-set-switch', htmlFor: 'dvc-portrait' },

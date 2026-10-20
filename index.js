@@ -121,6 +121,14 @@ export const Config = z.object({
   /** How long one frame may take before it is abandoned. */
   portraitTimeoutMs: z.natural().min(1000).default(60_000),
   /**
+   * What a call says first, when the active character has no line of its own.
+   *
+   * Volatile because it is edited from the settings page; a character's own line
+   * still wins, since a character is a more specific instruction than the
+   * deployment default.
+   */
+  opening: z.string().max(300).default('').volatile(),
+  /**
    * The character a call is placed as; empty means no character is selected and
    * the voice settings above apply directly.
    */
@@ -1781,20 +1789,21 @@ export function apply(ctx, config) {
     await loadVoiceSettings(ctx, voice)
   }
   /**
-   * Read one volatile switch as it stands right now.
+   * Read one volatile setting as it stands right now.
    *
-   * `ensureVoice` is a one-shot, so a switch flipped later would be invisible to
-   * it. These few booleans are cheap, so they are asked for on every request
+   * `ensureVoice` is a one-shot, so a setting changed later would be invisible to
+   * it. These few values are cheap, so they are asked for on every request
    * rather than cached with the voice selection.
    */
-  const liveSwitch = async (name, fallback) => {
+  const liveSetting = async (name, fallback) => {
     const settings = ctx.get('settings')
     const entry = ctx.fiber?.entry?.options?.id
     if (settings === undefined || entry === undefined) return readConfig(config[name], fallback)
     try {
       const described = settings.describe().find((item) => item.ns === entry)
       const value = described?.value?.[name]
-      if (typeof value === 'boolean') return value
+      // The stored value decides its own type; a missing one falls through.
+      if (value !== undefined && value !== null) return value
     } catch { /* fall through to the config default */ }
     return readConfig(config[name], fallback)
   }
@@ -2036,6 +2045,8 @@ export function apply(ctx, config) {
               cloudVoice: voice.cloudVoice,
               cloneId: voice.cloneId,
               cloudFallback: voice.cloudFallback,
+              portrait: await liveSetting('portrait', false),
+              opening: await liveSetting('opening', ''),
             },
           })
           return
@@ -2065,13 +2076,15 @@ export function apply(ctx, config) {
           if (typeof patch.cloudVoice === 'string') voice.cloudVoice = patch.cloudVoice
           if (typeof patch.cloneId === 'string') voice.cloneId = patch.cloneId
           if (typeof patch.cloudFallback === 'boolean') voice.cloudFallback = patch.cloudFallback
-          // The figure switches are not part of the voice selection: they live
+          // The figure settings are not part of the voice selection: they live
           // in the profile entry directly, the same way the voice does.
-          if (typeof patch.portrait === 'boolean') {
-            await persistSwitches(ctx, {
-              ...typeof patch.portrait === 'boolean' ? { portrait: patch.portrait } : {},
-              })
-            // Read back so the next frame is built the way the switch says.
+          const figurePatch = {
+            ...typeof patch.portrait === 'boolean' ? { portrait: patch.portrait } : {},
+            ...typeof patch.opening === 'string' ? { opening: patch.opening.slice(0, 300) } : {},
+          }
+          if (Object.keys(figurePatch).length > 0) {
+            await persistSwitches(ctx, figurePatch)
+            // A new switch changes how the next frame is built.
             if (typeof patch.portrait === 'boolean') portraitCache.key = ''
           }
           // The prompt variable follows the selection, so the agent's name for
@@ -2126,12 +2139,22 @@ export function apply(ctx, config) {
         if (route === `${ROUTE_PREFIX}/opening` && req.method === 'GET') {
           // The line the call speaks first, and whose voice says it. Read when a
           // call opens, so editing a character applies to the next call.
+          //
+          // A character's own line wins over the deployment default: a character
+          // is a more specific instruction than "whatever this deployment says".
+          // The default is what makes the feature work with no character at all.
           await ensureVoice()
           await refreshCharacter()
           const record = character.record
+          const fromCharacter = record === null ? '' : record.opening.trim()
+          const fromSettings = await liveSetting('opening', '')
+          const opening = fromCharacter !== '' ? fromCharacter : (typeof fromSettings === 'string' ? fromSettings.trim() : '')
           json(res, 200, {
             name: record === null ? '' : record.name,
-            opening: record === null ? '' : record.opening,
+            opening,
+            // Which one supplied it, so a surprising greeting can be traced to
+            // the character or to the deployment setting.
+            source: fromCharacter !== '' ? 'character' : (opening !== '' ? 'settings' : 'none'),
           }, { 'cache-control': 'no-store' })
           return
         }
@@ -2256,7 +2279,7 @@ export function apply(ctx, config) {
           // Frames are pulled rather than pushed: the browser asks for the next
           // one when it is ready, so a slow GPU throttles the animation instead
           // of building a queue of stale frames.
-          if (!await liveSwitch('portrait', false)) {
+          if (!await liveSetting('portrait', false)) {
             throw new RequestError('The portrait animator is switched off', 409)
           }
           const body = await readBody(req, config.maxTextBytes)
@@ -2293,7 +2316,7 @@ export function apply(ctx, config) {
         if (route === `${ROUTE_PREFIX}/portrait` && req.method === 'HEAD') {
           // Whether the animator can run at all, so the call can choose between
           // a moving mouth and a still picture before it asks for a frame.
-          const enabled = await liveSwitch('portrait', false)
+          const enabled = await liveSetting('portrait', false)
           const stored = await readFigure(config)
           const available = enabled && stored !== undefined
           res.writeHead(200, {

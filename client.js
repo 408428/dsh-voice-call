@@ -1669,7 +1669,11 @@
           figureRev: 0,
         })
         const write = async (patch) => {
-          store.set({ saving: true, notice: null })
+          // Apply the change locally first. The field renders from the store, so
+          // waiting for the round trip would make each keystroke jump back to the
+          // old value -- which is exactly what "it will not keep my typing" looks
+          // like. The reply replaces the values it knows about.
+          store.set({ ...patch, saving: true, notice: null })
           try {
             const response = await fetch('/.dsh-voice-call/settings', {
               method: 'POST',

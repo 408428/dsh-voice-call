@@ -85,7 +85,7 @@
               complete: true
 
     - id: voice-call
-      name: '@local/dsh-voice-call'
+      name: 'dsh-voice-call'
       config:
         # Local voice first: a call cannot afford a cloud round trip per sentence.
         localTts: true

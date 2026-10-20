@@ -13,7 +13,7 @@
  * The local voice is what makes a call feel like a call: a cloud round trip
  * costs seconds, and a conversation cannot afford that on every turn.
  *
- * @module @local/dsh-voice-call
+ * @module dsh-voice-call
  */
 
 import { spawn } from 'node:child_process'

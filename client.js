@@ -12,7 +12,7 @@
  */
 ;(function () {
   window.__ModuleLoader__.load({
-    id: '@local/dsh-voice-call',
+    id: 'dsh-voice-call',
     factory(require) {
       const React = require('react')
       const h = React.createElement

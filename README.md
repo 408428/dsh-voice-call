@@ -4,6 +4,44 @@ A WeChat-style voice call with the agent, inside the DeepSeek Harness Web UI.
 
 侧边栏底部、设置按钮上方的电话按钮打开通话界面：有头像、接听和挂断键，智能体说的话会念出来，双方说的话实时转成文字。每次通话都会新建一个对话，并自动切到最快的模型、关闭思考，回复还会边生成边念。
 
+## Install
+
+The plugin is a DeepSeek Harness bundle: install it into a profile and DSH loads
+it on the next start.
+
+```sh
+# from a checkout
+cd /path/to/dsh-voice-call
+dsh plugin install . --profile web
+
+# or by URL, once it is on a registry or a git remote
+dsh plugin install git+https://github.com/liyanze/dsh-voice-call.git --profile web
+```
+
+Then restart the harness:
+
+```sh
+~/dsh-start.sh      # or however you start DSH
+```
+
+You can also install it from the Web UI: **Settings → Plugins → Install**, and
+point it at this directory or the repository URL.
+
+### What else it needs
+
+The plugin works as soon as it is installed, but two things make it much better.
+Both are optional, and the plugin says what is missing instead of failing.
+
+| For | What to do |
+| --- | --- |
+| **A local voice** | Piper, one model: `~/.dsh/voice-call/models/zh_CN-huayan-medium.onnx`. Without it calls use the cloud voice. |
+| **Cloning a voice** | XTTS v2 in `~/.dsh/voice-call/venv` — about 6 GB and slow to set up. Without it, "clone from a recording" reports that the engine is missing. |
+| **A mouth that moves** | LivePortrait in `~/.dsh/voice-call/liveportrait` plus its own venv — about 630 MB. Without it the call shows the picture still. |
+| **Recording conversion** | `ffmpeg` on `PATH`; only needed to upload a recording that is not already WAV. |
+
+Every path can be overridden in the plugin config, so nothing has to live under
+`~/.dsh` if you prefer otherwise.
+
 ## What it does
 
 - **Call button** at the sidebar foot, directly above Settings. It starts a

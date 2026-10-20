@@ -1,8 +1,8 @@
 {
-  "name": "@local/dsh-voice-call",
-  "version": "0.1.0",
-  "private": true,
-  "description": "WeChat-style voice call for DeepSeek Harness: sidebar call button, avatar, accept and hang-up, local Piper speech with a cloud fallback, and a fresh fast-mode conversation per call",
+  "name": "dsh-voice-call",
+  "version": "0.3.0",
+  "private": false,
+  "description": "WeChat-style voice call for DeepSeek Harness: a sidebar call button, a live avatar that speaks, local speech recognition and synthesis with a cloud fallback, characters with their own voice and picture, and a mouth that moves with the audio",
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -20,7 +20,8 @@
     "locale/*.json",
     "icon.svg",
     "README.md",
-    "xtts_worker.py"
+    "xtts_worker.py",
+    "LICENSE"
   ],
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.4"
@@ -40,5 +41,23 @@
         "@deepseek-ai/dsh-client-ui-workspace"
       ]
     }
-  }
+  },
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "voice",
+    "tts",
+    "asr",
+    "liveportrait",
+    "piper",
+    "xtts",
+    "avatar"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/liyanze/dsh-voice-call.git"
+  },
+  "author": "liyanze",
+  "homepage": "https://github.com/liyanze/dsh-voice-call#readme"
 }

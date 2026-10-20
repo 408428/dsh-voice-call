@@ -42,6 +42,26 @@ Both are optional, and the plugin says what is missing instead of failing.
 Every path can be overridden in the plugin config, so nothing has to live under
 `~/.dsh` if you prefer otherwise.
 
+### Fetching the models
+
+`scripts/fetch-models.sh` downloads them, because they are far too large to keep
+in the repository (XTTS is 1.8 GB and LivePortrait 630 MB):
+
+```sh
+./scripts/fetch-models.sh voice     # local Piper voice, ~61 MB
+./scripts/fetch-models.sh portrait  # LivePortrait mouth animation, ~630 MB
+./scripts/fetch-models.sh clone     # XTTS v2 cloning, ~1.8 GB
+./scripts/fetch-models.sh all
+```
+
+It skips anything already present, so it is safe to re-run, and it removes a
+partial file rather than leaving a broken model behind. Set
+`DSH_VOICE_CALL_HOME` to put the files somewhere other than `~/.dsh/voice-call`.
+
+**Speech recognition needs nothing.** The plugin asks the Harness's own
+`speechToText` service, which the deployment already runs; only synthesis and
+the mouth animation need models of their own.
+
 ## What it does
 
 - **Call button** at the sidebar foot, directly above Settings. It starts a
@@ -72,13 +92,15 @@ Every path can be overridden in the plugin config, so nothing has to live under
 
 | File | Responsibility |
 |---|---|
-| `index.js` (Host) | Two routes under `/.dsh-voice-call`: `POST /tts` (text → audio) and `POST /asr` (WAV → text). Synthesis prefers the local voice; recognition uses the `bl` CLI. |
+| `index.js` (Host) | Two routes under `/.dsh-voice-call`: `POST /tts` (text → audio) and `POST /asr` (WAV → text). Synthesis prefers the local voice; recognition uses the Harness's own `speechToText` service. |
 | `piper_worker.py` (Host) | The resident local voice: loads a Piper model once and answers many utterances over a line protocol. |
 | `client.js` (Client) | Microphone capture with silence segmentation, playback, the session bridge, and the slot registrations. |
 
-Speech recognition is not implemented in this plugin: the Host half runs the
-`bl` CLI that already holds the user's Bailian API key in
-`~/.bailian/config.json`, so the plugin carries no credential of its own.
+**Speech recognition is not implemented in this plugin, and needs no model of
+its own.** The Host asks the Harness's `speechToText` service, which the
+deployment already runs, so a call transcribes with whatever recognizer is
+configured there -- no download, no credential, nothing to install. The `bl` CLI
+is only the fallback for a deployment with no local recognizer registered.
 
 ### Local voice
 

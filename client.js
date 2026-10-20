@@ -1902,7 +1902,29 @@
 
         useEffect(() => {
           alive.current = true
+          /** Ask for one frame at the given mouth opening. */
+          const fetchFrame = async (open) => {
+            const response = await fetch('/.dsh-voice-call/portrait/frame', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ open }),
+            })
+            if (!response.ok) throw new Error(`HTTP ${String(response.status)}`)
+            const body = await response.json()
+            if (body.frame === undefined) throw new Error('no frame')
+            return `data:image/jpeg;base64,${body.frame}`
+          }
           const loop = async () => {
+            // One still frame first: the panel would otherwise be an empty box
+            // until the character spoke, which reads as a broken picture rather
+            // than a quiet one.
+            try {
+              const still = await fetchFrame(0)
+              if (alive.current) setSrc(still)
+            } catch {
+              if (alive.current) setFailed(true)
+              return
+            }
             while (alive.current) {
               // Nothing to animate while the figure is quiet, so wait rather
               // than spending the GPU on a still image.

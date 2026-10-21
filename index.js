@@ -121,6 +121,17 @@ export const Config = z.object({
   /** How long one frame may take before it is abandoned. */
   portraitTimeoutMs: z.natural().min(1000).default(60_000),
   /**
+   * Download a missing model instead of reporting it missing.
+   *
+   * Only the model files can be fetched this way: the Piper voice (61 MB) and
+   * the LivePortrait weights (630 MB). A Python environment cannot be downloaded
+   * -- it needs packages installed for this machine -- so a missing interpreter
+   * is still reported rather than fetched.
+   */
+  autoFetchModels: z.boolean().default(true).volatile(),
+  /** Deadline for one model download; minutes, not seconds, because of the size. */
+  fetchTimeoutMs: z.natural().min(10_000).default(30 * 60_000),
+  /**
    * What a call says first, when the active character has no line of its own.
    *
    * Volatile because it is edited from the settings page; a character's own line
@@ -987,6 +998,133 @@ function localPaths(config) {
 }
 
 /**
+ * The pieces `scripts/fetch-models.sh` can download, and how to tell each is
+ * already present.
+ *
+ * Only files the script fetches appear here. A Python environment is not one of
+ * them: it has to be built for the machine, so a missing interpreter is reported
+ * rather than downloaded, and the message says which command would build it.
+ */
+const MODEL_PIECES = {
+  voice: {
+    label: 'the local voice (about 61 MB)',
+    // A call with no voice is a broken call, and this is small enough to wait
+    // for: roughly a minute on a slow line.
+    inline: true,
+    // Any voice will do: the point is that the synthesizer has something to load.
+    // A missing pair is treated as missing, because a lone .onnx cannot load.
+    present: async (paths) => {
+      const entries = await readdir(paths.voiceDir).catch(() => [])
+      return entries.some((name) => name.endsWith('.onnx'))
+    },
+  },
+  portrait: {
+    label: 'the mouth animator (about 630 MB)',
+    // 630 MB must not stand between the user and a call. It is fetched in the
+    // background and the call shows the still picture until it lands.
+    inline: false,
+    present: async (paths) => await readable(join(
+      paths.portraitRoot, 'pretrained_weights', 'liveportrait', 'base_models', 'spade_generator.pth',
+    )),
+  },
+}
+
+/**
+ * Whether a missing model may be downloaded, as the setting stands right now.
+ *
+ * Read fresh rather than cached: the switch is a user setting, and a call made
+ * after flipping it must see the new value.
+ *
+ * @param ctx - plugin context owning the settings service.
+ * @param config - validated plugin configuration.
+ * @returns whether downloading is allowed.
+ */
+async function autoFetchEnabled(ctx, config) {
+  const settings = ctx.get('settings')
+  const entry = ctx.fiber?.entry?.options?.id
+  if (settings === undefined || entry === undefined) return readConfig(config.autoFetchModels, true)
+  try {
+    const described = settings.describe().find((item) => item.ns === entry)
+    if (typeof described?.value?.autoFetchModels === 'boolean') return described.value.autoFetchModels
+  } catch { /* fall through to the config default */ }
+  return readConfig(config.autoFetchModels, true)
+}
+
+/** Pieces already being downloaded in the background, so a second call does not start a third. */
+const fetchingPieces = new Set()
+
+/**
+ * Download a piece in the background, at most once per process.
+ *
+ * Used for the pieces too large to stand between the user and a call. The
+ * failure is logged rather than shown: the call works without it, and a notice
+ * about a background download would be noise.
+ *
+ * @param ctx - plugin context owning the subprocess service.
+ * @param config - validated plugin configuration.
+ * @param piece - a key of MODEL_PIECES.
+ */
+function fetchPieceInBackground(ctx, config, piece) {
+  if (fetchingPieces.has(piece)) return
+  fetchingPieces.add(piece)
+  void fetchPiece(ctx, config, piece)
+    .then((ok) => {
+      ctx.logger?.[ok ? 'info' : 'warn']?.(
+        ok ? `voice-call: ${piece} is ready` : `voice-call: could not download ${piece}`,
+      )
+    })
+    .finally(() => { fetchingPieces.delete(piece) })
+}
+
+/**
+ * Download one missing piece, running the same script a user would run.
+ *
+ * Reusing the script keeps one copy of the URLs. It is also the reason this only
+ * covers model files: the script installs packages by telling you what to run,
+ * which a call cannot do on its own.
+ *
+ * @param ctx - plugin context owning the subprocess service.
+ * @param config - validated plugin configuration.
+ * @param piece - a key of MODEL_PIECES.
+ * @returns whether the piece is present afterwards.
+ */
+async function fetchPiece(ctx, config, piece) {
+  const script = join(PLUGIN_DIR, 'scripts', 'fetch-models.sh')
+  const subprocess = ctx.get('subprocess')
+  if (subprocess === undefined || !await readable(script)) return false
+  ctx.logger?.info?.(`voice-call: downloading ${MODEL_PIECES[piece].label}`)
+  // The command timeout is for a CLI reply, measured in seconds. A download is
+  // measured in minutes, so it gets its own generous deadline rather than being
+  // cut off halfway and leaving a partial file behind.
+  const signal = AbortSignal.timeout(config.fetchTimeoutMs)
+  const running = subprocess.spawn({
+    argv: ['bash', script, piece],
+    cwd: PLUGIN_DIR,
+    graceMs: 2000,
+    signal,
+    stdio: {
+      stdin: 'ignore',
+      stdout: { maxBytes: 64 * 1024 },
+      stderr: { maxBytes: 64 * 1024 },
+    },
+  })
+  try {
+    const { exitCode } = await running.done
+    if (exitCode !== 0) {
+      const stderr = running.collected.stderr?.readFrom(0).text ?? ''
+      ctx.logger?.warn?.(`voice-call: ${piece} download exited ${String(exitCode)}: ${stderr.trim().slice(-300)}`)
+      return false
+    }
+  } catch (error) {
+    running.terminate()
+    await running.waitForExit?.().catch(() => undefined)
+    ctx.logger?.warn?.(`voice-call: could not download ${piece}: ${String(error?.message ?? error)}`)
+    return false
+  }
+  return await MODEL_PIECES[piece].present(localPaths(config))
+}
+
+/**
  * Every selectable Piper voice on disk.
  *
  * A voice is an `.onnx` file beside its `.onnx.json` config; the pair is what
@@ -1110,10 +1248,31 @@ class LocalEngine {
     if (this.unavailable) return false
     if (this.checked === undefined) {
       const paths = localPaths(this.config)
-      const needed = [paths.python, this.options.worker, ...this.options.require]
-      const checks = await Promise.all(needed.map((path) => readable(path)))
-      this.checked = checks.every(Boolean)
-      if (!this.checked) this.unavailable = true
+      // The interpreter this engine actually runs, which is not always the
+      // speech one: LivePortrait has its own environment. Checking the wrong
+      // one reported an engine as ready when its interpreter was missing.
+      const python = this.options.python ?? paths.python
+      // The interpreter is checked apart from the rest, because it is the one
+      // thing a download cannot supply: a fetched model is useless without the
+      // environment that reads it.
+      const baseOk = (await Promise.all([python, this.options.worker].map((path) => readable(path)))).every(Boolean)
+      const hasModels = async () => (await Promise.all(this.options.require.map((path) => readable(path)))).every(Boolean)
+      let ok = baseOk && await hasModels()
+      // A missing model can be fetched, so a fresh install works on the first
+      // call rather than telling the user to go run a script.
+      if (!ok && baseOk && this.options.fetchPiece !== undefined && await autoFetchEnabled(this.ctx, this.config)) {
+        const piece = MODEL_PIECES[this.options.fetchPiece]
+        // Wait only for a piece a call genuinely needs; the rest arrives in the
+        // background so a 630 MB download cannot stall a call.
+        if (piece.inline) {
+          await fetchPiece(this.ctx, this.config, this.options.fetchPiece)
+          ok = await hasModels()
+        } else {
+          fetchPieceInBackground(this.ctx, this.config, this.options.fetchPiece)
+        }
+      }
+      this.checked = ok
+      if (!ok) this.unavailable = true
     }
     return this.checked
   }
@@ -1429,7 +1588,12 @@ async function resolveVoice(ctx, config, voice) {
     ctx.logger.warn(`voice-call clone voice "${voice.cloneId}" is missing; using the local voice`)
   }
   if (config.localTts) {
-    const voices = await listLocalVoices(config)
+    let voices = await listLocalVoices(config)
+    // Nothing to synthesize with. Fetch the voice rather than silently falling
+    // back to the cloud, which is what makes a fresh install feel broken.
+    if (voices.length === 0 && await autoFetchEnabled(ctx, config)) {
+      if (await fetchPiece(ctx, config, 'voice')) voices = await listLocalVoices(config)
+    }
     const wanted = voice.localVoiceId !== '' ? voice.localVoiceId : config.localTtsModel
     const hit = voices.find((entry) => entry.id === wanted || entry.path === wanted)
       ?? voices.find((entry) => entry.id === 'zh_CN-huayan-medium')
@@ -1840,6 +2004,10 @@ export function apply(ctx, config) {
     worker: localPaths(config).portraitWorker,
     args: [localPaths(config).figure, localPaths(config).portraitRoot],
     python: localPaths(config).portraitPython,
+    // Fetched when absent; the picture is not, because only the user can choose
+    // which face to animate.
+    fetchPiece: 'portrait',
+    require: [join(localPaths(config).portraitRoot, 'pretrained_weights', 'liveportrait', 'base_models', 'spade_generator.pth')],
     timeoutMs: config.portraitTimeoutMs,
     require: [],
   })
@@ -2047,6 +2215,7 @@ export function apply(ctx, config) {
               cloudFallback: voice.cloudFallback,
               portrait: await liveSetting('portrait', false),
               opening: await liveSetting('opening', ''),
+              autoFetchModels: await liveSetting('autoFetchModels', true),
             },
           })
           return
@@ -2081,6 +2250,7 @@ export function apply(ctx, config) {
           const figurePatch = {
             ...typeof patch.portrait === 'boolean' ? { portrait: patch.portrait } : {},
             ...typeof patch.opening === 'string' ? { opening: patch.opening.slice(0, 300) } : {},
+            ...typeof patch.autoFetchModels === 'boolean' ? { autoFetchModels: patch.autoFetchModels } : {},
           }
           if (Object.keys(figurePatch).length > 0) {
             await persistSwitches(ctx, figurePatch)

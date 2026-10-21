@@ -136,6 +136,9 @@
           'characters.avatarOk': 'Picture updated.',
           'characters.failed': 'Could not save: {message}',
           'characters.confirmDelete': 'Delete this character? Its picture and settings are removed.',
+          'settings.autoFetch': 'Download missing models',
+          'settings.autoFetchOn': 'On: when a model is absent it is fetched from the internet. The local voice (about 61 MB) is downloaded before a call needs it, and the mouth animator (about 630 MB) downloads in the background so a call is never kept waiting. Only model files can be fetched this way; a missing Python environment still has to be installed by hand.',
+          'settings.autoFetchOff': 'Off: nothing is downloaded. A missing model is reported instead, and the call falls back to the cloud voice or a still picture.',
           'settings.opening': 'First words',
           'settings.openingHint': 'What a call says the moment it is answered, when the character has no line of its own. Leave it empty and the call waits for you.',
           'settings.openingPlaceholder': 'For example: 你好，我在。',
@@ -268,6 +271,9 @@
           'characters.avatarOk': '头像已更新。',
           'characters.failed': '保存失败：{message}',
           'characters.confirmDelete': '删除这个角色？它的头像和设置会一起删除。',
+          'settings.autoFetch': '自动下载缺失的模型',
+          'settings.autoFetchOn': '开启：模型缺失时自动联网下载。本地声线（约 61MB）会在通话前下好，口型动画（约 630MB）在后台下载，不会卡住通话。注意只能下载模型文件；Python 环境仍需手动安装。',
+          'settings.autoFetchOff': '关闭：不下载任何东西。模型缺失时会直接告知，通话改用云端声线或静态照片。',
           'settings.opening': '全局第一句话',
           'settings.openingHint': '角色自己没有开场白时，接听后说的第一句话。留空则等你先开口。',
           'settings.openingPlaceholder': '例如：你好，我在。',
@@ -1659,6 +1665,8 @@
           portrait: false,
           /** What a call says first when the character has no line of its own. */
           opening: '',
+          /** Whether a missing model may be downloaded; on unless turned off. */
+          autoFetchModels: true,
           voices: [],
           cloudVoices: [],
           saving: false,
@@ -2065,6 +2073,16 @@
               h('span', { className: 'dvc-set-label' }, t('settings.fallback'))),
             h('p', { className: 'dvc-set-note' },
               t(state.cloudFallback ? 'settings.fallbackOn' : 'settings.fallbackOff'))),
+          // Whether a missing model may be downloaded.
+          h('section', { className: 'dvc-set-block' },
+            h('label', { className: 'dvc-set-switch', htmlFor: 'dvc-autofetch' },
+              h('input', {
+                id: 'dvc-autofetch', type: 'checkbox', checked: state.autoFetchModels !== false,
+                onChange: (event) => { void settings.write({ autoFetchModels: event.target.checked }) },
+              }),
+              h('span', { className: 'dvc-set-label' }, t('settings.autoFetch'))),
+            h('p', { className: 'dvc-set-note' },
+              t(state.autoFetchModels !== false ? 'settings.autoFetchOn' : 'settings.autoFetchOff'))),
           // What a call says first, when the character has no line of its own.
           h('section', { className: 'dvc-set-block' },
             h('label', { className: 'dvc-set-label', htmlFor: 'dvc-opening' }, t('settings.opening')),

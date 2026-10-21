@@ -44,19 +44,30 @@ Every path can be overridden in the plugin config, so nothing has to live under
 
 ### Fetching the models
 
-`scripts/fetch-models.sh` downloads them, because they are far too large to keep
-in the repository (XTTS is 1.8 GB and LivePortrait 630 MB):
+The voice and the mouth animator are attached to the
+**[v0.3.0 release](https://github.com/408428/dsh-voice-call/releases/tag/v0.3.0)**
+rather than committed, because they are too large for a repository:
+
+| Asset | What it is | Size |
+| --- | --- | --- |
+| `piper-zh_CN-huayan-medium.tar.gz` | The local Chinese voice | 56 MB |
+| `liveportrait-weights.tar.gz` | Mouth animation weights and the face detector | 583 MB |
+
+`scripts/fetch-models.sh` downloads, verifies, and unpacks them:
 
 ```sh
-./scripts/fetch-models.sh voice     # local Piper voice, ~61 MB
-./scripts/fetch-models.sh portrait  # LivePortrait mouth animation, ~630 MB
+./scripts/fetch-models.sh voice     # local Piper voice, ~56 MB
+./scripts/fetch-models.sh portrait  # LivePortrait mouth animation, ~583 MB
 ./scripts/fetch-models.sh clone     # XTTS v2 cloning, ~1.8 GB
+./scripts/fetch-models.sh status    # what is present, what is missing
 ./scripts/fetch-models.sh all
 ```
 
-It skips anything already present, so it is safe to re-run, and it removes a
-partial file rather than leaving a broken model behind. Set
-`DSH_VOICE_CALL_HOME` to put the files somewhere other than `~/.dsh/voice-call`.
+It checks the archive's SHA-256 before unpacking, so a truncated download is
+caught rather than left as a model that loads and then fails. It skips anything
+already present, so it is safe to re-run, and the weights fall back to the
+upstream hosts if the release is unreachable. Set `DSH_VOICE_CALL_HOME` to put
+the files somewhere other than `~/.dsh/voice-call`.
 
 **Speech recognition needs nothing.** The plugin asks the Harness's own
 `speechToText` service, which the deployment already runs; only synthesis and
